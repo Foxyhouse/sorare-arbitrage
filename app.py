@@ -29,47 +29,57 @@ def sorare_sign_in(email, hashed_password=None, otp_attempt=None, otp_session_ch
     except Exception as e: return {"errors": [{"message": str(e)}]}
 
 def get_market_data(slug, jwt_token):
-    headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE}
+    headers = {
+        "Authorization": f"Bearer {jwt_token}",
+        "JWT-AUD": AUDIENCE,
+        "Content-Type": "application/json"
+    }
     
-    # REQUÊTE MISE À JOUR : On sépare Limited et Rare pour plus de clarté
+    # NOUVELLE STRATÉGIE : On interroge 'cards' directement à la racine
+    # On filtre par playerSlugs pour avoir les prix de Koffi ou Lefort
     query = """
-    query GetFloor($slugs: [String!]!) {
-      players(slugs: $slugs) {
-        ... on Player {
-          displayName
-          limitedFloor: cards(rarities: [limited], first: 1, onSale: true, publicSearch: true) {
-            nodes { amount { eur } }
-          }
-          rareFloor: cards(rarities: [rare], first: 1, onSale: true, publicSearch: true) {
-            nodes { amount { eur } }
+    query GetMarketFloor($slug: String!) {
+      cards(playerSlugs: [$slug], rarities: [limited, rare], onSale: true, first: 50) {
+        nodes {
+          rarity
+          amount {
+            eur
           }
         }
       }
     }
     """
     try:
-        response = requests.post(API_URL, json={'query': query, 'variables': {'slugs': [slug]}}, headers=headers)
+        response = requests.post(API_URL, json={'query': query, 'variables': {'slug': slug}}, headers=headers)
         res_json = response.json()
         
-        # On stocke la réponse brute pour le débug
+        # On garde le debug au cas où
         st.session_state['last_debug'] = res_json 
         
-        player = res_json.get('data', {}).get('players', [None])[0]
-        if not player: return None, None
+        if "errors" in res_json:
+            return None, None
+
+        # On récupère la liste des cartes en vente
+        cards = res_json.get('data', {}).get('cards', {}).get('nodes', [])
         
-        # Extraction sécurisée
-        try:
-            p_lim = player['limitedFloor']['nodes'][0]['amount']['eur']
-        except: p_lim = None
-            
-        try:
-            p_rare = player['rareFloor']['nodes'][0]['amount']['eur']
-        except: p_rare = None
-            
+        lim_prices = []
+        rare_prices = []
+        
+        for c in cards:
+            if c.get('amount') and c['amount'].get('eur'):
+                val = float(c['amount']['eur'])
+                if c['rarity'] == 'limited':
+                    lim_prices.append(val)
+                elif c['rarity'] == 'rare':
+                    rare_prices.append(val)
+        
+        # On calcule les prix planchers
+        p_lim = min(lim_prices) if lim_prices else None
+        p_rare = min(rare_prices) if rare_prices else None
+        
         return p_lim, p_rare
     except:
         return None, None
-
 # --- INTERFACE ---
 
 st.set_page_config(page_title="Sorare Bot V3", page_icon="🕵️‍♂️")
