@@ -85,9 +85,76 @@ elif st.session_state['otp_challenge'] and not st.session_state['final_token']:
         else:
             st.error("Code invalide.")
 
-# ÉTAPE 3 : Dashboard
+# ÉTAPE 3 : Dashboard (Une fois connecté)
 if st.session_state['final_token']:
     st.success("✅ Connecté avec succès !")
-    # IMPORTANT : Pour les prochaines requêtes, la doc exige :
-    # Header 'Authorization': 'Bearer <token>'
-    # Header 'JWT-AUD': 'sorare-app'
+    
+    # Configuration des headers selon la doc GitHub
+    # Note : la doc exige le header JWT-AUD identique à celui utilisé lors du login
+    headers = {
+        "Authorization": f"Bearer {st.session_state['final_token']}",
+        "JWT-AUD": "sorare-app",
+        "Content-Type": "application/json"
+    }
+
+    def get_market_data(slug):
+        query = """
+        query GetFloorPrices($slug: String!) {
+          player(slug: $slug) {
+            displayName
+            limited: cards(rarities: [limited], first: 1, publicSearch: true) {
+              nodes { amounts { eur } }
+            }
+            rare: cards(rarities: [rare], first: 1, publicSearch: true) {
+              nodes { amounts { eur } }
+            }
+          }
+        }
+        """
+        try:
+            response = requests.post(API_URL, json={'query': query, 'variables': {'slug': slug}}, headers=headers)
+            data = response.json().get('data', {}).get('player', {})
+            
+            p_lim = data['limited']['nodes'][0]['amounts']['eur']
+            p_rare = data['rare']['nodes'][0]['amounts']['eur']
+            return p_lim, p_rare
+        except:
+            return None, None
+
+    # --- TON MONITORING ---
+    st.divider()
+    st.subheader("🕵️‍♂️ Opportunités d'Arbitrage en Direct")
+    
+    # On définit tes cibles
+    targets = {
+        "Hervé Koffi": "herve-koffi",
+        "Jordan Lefort": "jordan-lefort"
+    }
+
+    # Création d'un tableau propre
+    for name, slug in targets.items():
+        p_lim, p_rare = get_market_data(slug)
+        
+        if p_lim and p_rare:
+            ratio = p_rare / p_lim
+            
+            col1, col2, col3, col4 = st.columns([2, 1, 1, 2])
+            with col1:
+                st.markdown(f"**{name}**")
+            with col2:
+                st.write(f"L: {p_lim}€")
+            with col3:
+                st.write(f"R: {p_rare}€")
+            with col4:
+                # La règle d'or : Gain x4 / Prix < x4
+                if ratio < 4.0:
+                    st.success(f"🔥 Ratio: {ratio:.2f} | ACHÈTE RARE")
+                else:
+                    st.info(f"⚖️ Ratio: {ratio:.2f} | Reste en Limited")
+        else:
+            st.error(f"Données indisponibles pour {name}")
+
+    if st.button("Se déconnecter"):
+        st.session_state['final_token'] = None
+        st.session_state['otp_challenge'] = None
+        st.rerun()
