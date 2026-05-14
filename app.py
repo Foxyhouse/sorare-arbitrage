@@ -1,14 +1,22 @@
 import streamlit as st
 import requests
+import bcrypt
 
 API_URL = "https://api.sorare.com/graphql"
 
-def sorare_sign_in(email, password, otp=None, otp_session_challenge=None):
-    # MISE À JOUR : On ajoute l'argument (aud: "sorare") requis par le schéma 2026
+# 1. Fonction pour récupérer le sel (Salt)
+def get_user_salt(email):
+    res = requests.get(f"https://api.sorare.com/api/v1/users/{email}")
+    if res.status_code == 200:
+        return res.json().get("salt")
+    return None
+
+# 2. Fonction de connexion (Mutation officielle)
+def sorare_sign_in(email, hashed_password=None, otp_attempt=None, otp_session_challenge=None):
     query = """
     mutation SignInMutation($input: signInInput!) {
       signIn(input: $input) {
-        jwtToken(aud: "sorare") {
+        jwtToken(aud: "sorare-app") {
           token
         }
         otpSessionChallenge
@@ -16,80 +24,70 @@ def sorare_sign_in(email, password, otp=None, otp_session_challenge=None):
       }
     }
     """
-    input_data = {"email": email, "password": password}
-    if otp:
-        input_data["otp"] = otp
+    # Construction de l'input selon la doc
     if otp_session_challenge:
-        input_data["otpSessionChallenge"] = otp_session_challenge
+        input_data = {
+            "otpSessionChallenge": otp_session_challenge,
+            "otpAttempt": otp_attempt # La doc dit 'otpAttempt'
+        }
+    else:
+        input_data = {
+            "email": email,
+            "password": hashed_password
+        }
 
-    try:
-        headers = {"User-Agent": "SorareArbitrageBot/1.0"}
-        response = requests.post(API_URL, json={'query': query, 'variables': {"input": input_data}}, headers=headers)
-        return response.json()
-    except Exception as e:
-        return {"error_exception": str(e)}
+    response = requests.post(API_URL, json={'query': query, 'variables': {"input": input_data}})
+    return response.json()
 
 # --- INTERFACE ---
-st.title("🛡️ Sorare Auth 2FA (Fix Argument 'aud')")
+st.title("⚽ Sorare Auth (Conforme GitHub Doc)")
 
-if 'otp_challenge' not in st.session_state: st.session_state['otp_challenge'] = None
 if 'final_token' not in st.session_state: st.session_state['final_token'] = None
+if 'otp_challenge' not in st.session_state: st.session_state['otp_challenge'] = None
 
-# ÉTAPE 1 : Connexion initiale
+# ÉTAPE 1 : Email + Password (Hashé)
 if not st.session_state['otp_challenge'] and not st.session_state['final_token']:
-    with st.form("login_form"):
-        u_email = st.text_input("Email", value="jacques.troispoils@gmail.com")
+    with st.form("login"):
+        u_email = st.text_input("Email")
         u_pass = st.text_input("Mot de passe", type="password")
-        submit = st.form_submit_button("Lancer la connexion")
-        
-        if submit:
-            res = sorare_sign_in(u_email, u_pass)
-            
-            if "errors" in res and not res.get("data"):
-                st.error(f"Erreur API : {res['errors'][0]['message']}")
-            else:
+        if st.form_submit_button("Se connecter"):
+            # A. Récupérer le sel
+            salt = get_user_salt(u_email)
+            if salt:
+                # B. Hasher le mot de passe (Important !)
+                hashed_pw = bcrypt.hashpw(u_pass.encode('utf-8'), salt.encode('utf-8')).decode('utf-8')
+                
+                # C. Envoyer la mutation
+                res = sorare_sign_in(u_email, hashed_password=hashed_pw)
                 data = res.get('data', {}).get('signIn', {})
-                if data:
-                    if data.get('otpSessionChallenge'):
-                        st.session_state['otp_challenge'] = data['otpSessionChallenge']
-                        st.session_state['temp_email'] = u_email
-                        st.session_state['temp_pass'] = u_pass
-                        st.rerun()
-                    elif data.get('jwtToken'): 
-                        st.session_state['final_token'] = data['jwtToken']['token']
-                        st.rerun()
-                    elif data.get('errors'):
-                        st.error(f"Erreur : {data['errors'][0]['message']}")
+                
+                if data.get('otpSessionChallenge'):
+                    st.session_state['otp_challenge'] = data['otpSessionChallenge']
+                    st.session_state['temp_email'] = u_email
+                    st.rerun()
+                elif data.get('jwtToken'):
+                    st.session_state['final_token'] = data['jwtToken']['token']
+                    st.rerun()
                 else:
-                    st.error("Réponse vide.")
-
-# ÉTAPE 2 : Saisie du code OTP
-elif st.session_state['otp_challenge'] and not st.session_state['final_token']:
-    with st.form("otp_form"):
-        st.warning("📱 Code 2FA requis")
-        otp_code = st.text_input("Saisir les 6 chiffres")
-        submit_otp = st.form_submit_button("Valider")
-        
-        if submit_otp:
-            # Note : on réutilise la même fonction qui contient maintenant (aud: "sorare")
-            res = sorare_sign_in(
-                st.session_state['temp_email'], 
-                st.session_state['temp_pass'], 
-                otp=otp_code, 
-                otp_session_challenge=st.session_state['otp_challenge']
-            )
-            data = res.get('data', {}).get('signIn', {})
-            if data and data.get('jwtToken'):
-                st.session_state['final_token'] = data['jwtToken']['token']
-                st.rerun()
+                    st.error(data.get('errors', [{}])[0].get('message', "Erreur inconnue"))
             else:
-                st.error("Code incorrect ou expiré.")
+                st.error("Utilisateur introuvable.")
 
-# ÉTAPE 3 : Succès
+# ÉTAPE 2 : OTP (2FA)
+elif st.session_state['otp_challenge'] and not st.session_state['final_token']:
+    otp_code = st.text_input("Code 2FA (6 chiffres)")
+    if st.button("Valider"):
+        res = sorare_sign_in(st.session_state['temp_email'], otp_attempt=otp_code, otp_session_challenge=st.session_state['otp_challenge'])
+        data = res.get('data', {}).get('signIn', {})
+        if data.get('jwtToken'):
+            st.session_state['final_token'] = data['jwtToken']['token']
+            st.rerun()
+        else:
+            st.error("Code invalide.")
+
+# ÉTAPE 3 : Dashboard
 if st.session_state['final_token']:
-    st.balloons()
-    st.success("✅ Enfin ! Authentification réussie avec Audience validée.")
-    if st.button("Se déconnecter"):
-        st.session_state['final_token'] = None
-        st.session_state['otp_challenge'] = None
-        st.rerun()
+    st.success("✅ Connecté avec succès !")
+    # IMPORTANT : Pour les prochaines requêtes, la doc exige :
+    # Header 'Authorization': 'Bearer <token>'
+    # Header 'JWT-AUD': 'sorare-app'
