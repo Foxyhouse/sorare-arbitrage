@@ -39,42 +39,43 @@ def get_market_data(slug, jwt_token):
         "Content-Type": "application/json"
     }
     
-    # LA REQUÊTE CIBLE : On va chercher dans le marché des tokens
+    # STRATÉGIE 2026 : On demande le prix plancher directement au joueur
+    # C'est beaucoup plus rapide et stable que de fouiller dans les listes de cartes
     query = """
-    query GetMarketFloor($slug: String!) {
-      tokenMarket {
-        fixedPriceListings(playerSlugs: [$slug], rarities: [limited, rare]) {
-          nodes {
-            price { eur }
-            token { rarity }
-          }
+    query GetPlayerFloors($slugs: [String!]!) {
+      players(slugs: $slugs) {
+        ... on Player {
+          displayName
+          # Champs directs pour le Floor Price en 2026
+          limitedFloorPrice { eur }
+          rareFloorPrice { eur }
         }
       }
     }
     """
     try:
-        response = requests.post(API_URL, json={'query': query, 'variables': {'slug': slug}}, headers=headers)
+        response = requests.post(API_URL, json={'query': query, 'variables': {'slugs': [slug]}}, headers=headers)
         res_json = response.json()
+        
+        # Mise à jour du debug
         st.session_state['last_debug'] = res_json 
         
-        if "errors" in res_json: return None, None
+        if "errors" in res_json:
+            return None, None
 
-        listings = res_json.get('data', {}).get('tokenMarket', {}).get('fixedPriceListings', {}).get('nodes', [])
+        players = res_json.get('data', {}).get('players', [])
+        if not players or players[0] is None:
+            return None, None
+            
+        player = players[0]
         
-        lim_prices = []
-        rare_prices = []
+        # Récupération directe des valeurs
+        p_lim = player.get('limitedFloorPrice', {}).get('eur')
+        p_rare = player.get('rareFloorPrice', {}).get('eur')
         
-        for item in listings:
-            p = item.get('price', {}).get('eur')
-            r = item.get('token', {}).get('rarity')
-            if p and r:
-                val = float(p)
-                if r == 'limited': lim_prices.append(val)
-                elif r == 'rare': rare_prices.append(val)
-        
-        return (min(lim_prices) if lim_prices else None, 
-                min(rare_prices) if rare_prices else None)
-    except:
+        return (float(p_lim) if p_lim else None, 
+                float(p_rare) if p_rare else None)
+    except Exception as e:
         return None, None
 
 # --- INTERFACE ---
