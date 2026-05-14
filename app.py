@@ -2,33 +2,40 @@ import streamlit as st
 import requests
 import bcrypt
 
+# Configuration
 API_URL = "https://api.sorare.com/graphql"
+AUDIENCE = "sorare-app"
 
-# 1. Fonction pour récupérer le sel (Salt)
+# --- FONCTIONS TECHNIQUES ---
+
 def get_user_salt(email):
-    res = requests.get(f"https://api.sorare.com/api/v1/users/{email}")
-    if res.status_code == 200:
-        return res.json().get("salt")
+    """Récupère le sel unique de l'utilisateur pour le hashage."""
+    try:
+        res = requests.get(f"https://api.sorare.com/api/v1/users/{email}")
+        if res.status_code == 200:
+            return res.json().get("salt")
+    except:
+        return None
     return None
 
-# 2. Fonction de connexion (Mutation officielle)
 def sorare_sign_in(email, hashed_password=None, otp_attempt=None, otp_session_challenge=None):
+    """Effectue la mutation de connexion (Etape 1 ou Etape 2 avec OTP)."""
     query = """
     mutation SignInMutation($input: signInInput!) {
       signIn(input: $input) {
-        jwtToken(aud: "sorare-app") {
+        jwtToken(aud: "%s") {
           token
         }
         otpSessionChallenge
         errors { message }
       }
     }
-    """
-    # Construction de l'input selon la doc
+    """ % AUDIENCE
+
     if otp_session_challenge:
         input_data = {
             "otpSessionChallenge": otp_session_challenge,
-            "otpAttempt": otp_attempt # La doc dit 'otpAttempt'
+            "otpAttempt": otp_attempt
         }
     else:
         input_data = {
@@ -36,175 +43,125 @@ def sorare_sign_in(email, hashed_password=None, otp_attempt=None, otp_session_ch
             "password": hashed_password
         }
 
-    response = requests.post(API_URL, json={'query': query, 'variables': {"input": input_data}})
-    return response.json()
+    try:
+        response = requests.post(API_URL, json={'query': query, 'variables': {"input": input_data}})
+        return response.json()
+    except Exception as e:
+        return {"errors": [{"message": str(e)}]}
 
-# --- INTERFACE ---
-st.title("⚽ Sorare Auth (Conforme GitHub Doc)")
-
-if 'final_token' not in st.session_state: st.session_state['final_token'] = None
-if 'otp_challenge' not in st.session_state: st.session_state['otp_challenge'] = None
-
-# ÉTAPE 1 : Email + Password (Hashé)
-if not st.session_state['otp_challenge'] and not st.session_state['final_token']:
-    with st.form("login"):
-        u_email = st.text_input("Email")
-        u_pass = st.text_input("Mot de passe", type="password")
-        if st.form_submit_button("Se connecter"):
-            # A. Récupérer le sel
-            salt = get_user_salt(u_email)
-            if salt:
-                # B. Hasher le mot de passe (Important !)
-                hashed_pw = bcrypt.hashpw(u_pass.encode('utf-8'), salt.encode('utf-8')).decode('utf-8')
-                
-                # C. Envoyer la mutation
-                res = sorare_sign_in(u_email, hashed_password=hashed_pw)
-                data = res.get('data', {}).get('signIn', {})
-                
-                if data.get('otpSessionChallenge'):
-                    st.session_state['otp_challenge'] = data['otpSessionChallenge']
-                    st.session_state['temp_email'] = u_email
-                    st.rerun()
-                elif data.get('jwtToken'):
-                    st.session_state['final_token'] = data['jwtToken']['token']
-                    st.rerun()
-                else:
-                    st.error(data.get('errors', [{}])[0].get('message', "Erreur inconnue"))
-            else:
-                st.error("Utilisateur introuvable.")
-
-# ÉTAPE 2 : OTP (2FA)
-elif st.session_state['otp_challenge'] and not st.session_state['final_token']:
-    otp_code = st.text_input("Code 2FA (6 chiffres)")
-    if st.button("Valider"):
-        res = sorare_sign_in(st.session_state['temp_email'], otp_attempt=otp_code, otp_session_challenge=st.session_state['otp_challenge'])
-        data = res.get('data', {}).get('signIn', {})
-        if data.get('jwtToken'):
-            st.session_state['final_token'] = data['jwtToken']['token']
-            st.rerun()
-        else:
-            st.error("Code invalide.")
-
-# ÉTAPE 3 : Dashboard (Une fois connecté)
-if st.session_state['final_token']:
-    st.success("✅ Connecté avec succès !")
-    
-    # Configuration des headers selon la doc GitHub
-    # Note : la doc exige le header JWT-AUD identique à celui utilisé lors du login
+def get_market_data(slug, jwt_token):
+    """Récupère les prix planchers (Floor) via l'interface Player."""
     headers = {
-        "Authorization": f"Bearer {st.session_state['final_token']}",
-        "JWT-AUD": "sorare-app",
-        "Content-Type": "application/json"
+        "Authorization": f"Bearer {jwt_token}",
+        "JWT-AUD": AUDIENCE
     }
-
-     pour {name}. Vérifie si des cartes sont en vente.") 
-            def get_market_data(slug):
-        # Utilisation du fragment '... on Player' pour accéder au champ cards
-        query = """
-        query GetFloorPrices($slugs: [String!]!) {
-          players(slugs: $slugs) {
-            ... on Player {
-              displayName
-              cards(rarities: [limited, rare], first: 50) {
-                nodes {
-                  rarity
-                  onSale
-                  priceEur: amountNextStep { eur }
-                }
-              }
+    query = """
+    query GetFloorPrices($slugs: [String!]!) {
+      players(slugs: $slugs) {
+        ... on Player {
+          displayName
+          cards(rarities: [limited, rare], first: 50) {
+            nodes {
+              rarity
+              onSale
+              priceEur: amountNextStep { eur }
             }
           }
         }
-        """
-        try:
-            response = requests.post(API_URL, json={'query': query, 'variables': {'slugs': [slug]}}, headers=headers)
-            res_json = response.json()
-            
-            if "errors" in res_json:
-                st.error(f"Erreur API : {res_json['errors'][0]['message']}")
-                return None, None
-
-            players_list = res_json.get('data', {}).get('players', [])
-            if not players_list or players_list[0] is None:
-                return None, None
-            
-            player_data = players_list[0]
-            # On vérifie que player_data n'est pas vide (cas du fragment non trouvé)
-            if not player_data.get('cards'):
-                return None, None
-                
-            cards = player_data['cards'].get('nodes', [])
-            
-            # Extraction propre des prix
-            lim_prices = []
-            rare_prices = []
-            
-            for c in cards:
-                if c.get('onSale') and c.get('priceEur'):
-                    val = c['priceEur'].get('eur')
-                    if val:
-                        if c['rarity'] == 'limited':
-                            lim_prices.append(val)
-                        elif c['rarity'] == 'rare':
-                            rare_prices.append(val)
-            
-            p_lim = min(lim_prices) if lim_prices else None
-            p_rare = min(rare_prices) if rare_prices else None
-            
-            return p_lim, p_rare
-        except Exception as e:
+      }
+    }
+    """
+    try:
+        response = requests.post(API_URL, json={'query': query, 'variables': {'slugs': [slug]}}, headers=headers)
+        data = response.json().get('data', {}).get('players', [])
+        
+        if not data or data[0] is None:
             return None, None
+            
+        cards = data[0].get('cards', {}).get('nodes', [])
+        lim_prices = [c['priceEur']['eur'] for c in cards if c['rarity'] == 'limited' and c.get('onSale') and c.get('priceEur')]
+        rare_prices = [c['priceEur']['eur'] for c in cards if c['rarity'] == 'rare' and c.get('onSale') and c.get('priceEur')]
+        
+        p_lim = min(lim_prices) if lim_prices else None
+        p_rare = min(rare_prices) if rare_prices else None
+        
+        return p_lim, p_rare
+    except:
+        return None, None
 
-    # --- TON MONITORING ---
-    st.divider()
-    st.subheader("🕵️‍♂️ Opportunités d'Arbitrage en Direct")
+# --- INTERFACE UTILISATEUR (STREAMLIT) ---
+
+st.set_page_config(page_title="Sorare Arbitrage Bot", page_icon="🚀")
+st.title("🚀 Sorare Arbitrage Real-Time")
+
+# Initialisation de la session
+if 'final_token' not in st.session_state: st.session_state['final_token'] = None
+if 'otp_challenge' not in st.session_state: st.session_state['otp_challenge'] = None
+
+# --- ETAPE 1 & 2 : AUTHENTIFICATION ---
+if not st.session_state['final_token']:
+    # Formulaire de login classique
+    if not st.session_state['otp_challenge']:
+        with st.form("login_form"):
+            st.subheader("🔑 Connexion Sorare")
+            email = st.text_input("Email", value="jacques.troispoils@gmail.com")
+            password = st.text_input("Mot de passe", type="password")
+            if st.form_submit_button("Lancer la connexion"):
+                salt = get_user_salt(email)
+                if salt:
+                    # Hashage Bcrypt obligatoire
+                    hashed_pw = bcrypt.hashpw(password.encode('utf-8'), salt.encode('utf-8')).decode('utf-8')
+                    res = sorare_sign_in(email, hashed_password=hashed_pw)
+                    
+                    data = res.get('data', {}).get('signIn', {})
+                    if data:
+                        if data.get('otpSessionChallenge'):
+                            st.session_state['otp_challenge'] = data['otpSessionChallenge']
+                            st.session_state['temp_email'] = email
+                            st.rerun()
+                        elif data.get('jwtToken'):
+                            st.session_state['final_token'] = data['jwtToken']['token']
+                            st.rerun()
+                    else:
+                        st.error(res.get('errors', [{}])[0].get('message', "Erreur inconnue"))
+                else:
+                    st.error("Impossible de récupérer le sel du compte.")
     
-    targets = {
-        "Hervé Koffi": "kouakou-herve-koffi", 
+    # Formulaire OTP (si challenge activé)
+    else:
+        with st.form("otp_form"):
+            st.subheader("📱 Double Authentification")
+            otp_code = st.text_input("Code de ton appli 2FA")
+            if st.form_submit_button("Valider le code"):
+                res = sorare_sign_in(st.session_state['temp_email'], otp_attempt=otp_code, otp_session_challenge=st.session_state['otp_challenge'])
+                data = res.get('data', {}).get('signIn', {})
+                if data and data.get('jwtToken'):
+                    st.session_state['final_token'] = data['jwtToken']['token']
+                    st.rerun()
+                else:
+                    st.error("Code invalide. Réessaie.")
+
+# --- ETAPE 3 : DASHBOARD D'ARBITRAGE ---
+else:
+    st.success("✅ Connecté à l'API Sorare")
+    
+    with st.sidebar:
+        st.write(f"Connecté en tant que : {st.session_state.get('temp_email', 'Utilisateur')}")
+        if st.button("Se déconnecter"):
+            st.session_state['final_token'] = None
+            st.session_state['otp_challenge'] = None
+            st.rerun()
+
+    st.subheader("🕵️‍♂️ Monitoring des Ratios Rare/Limited")
+    
+    # Liste de tes joueurs cibles
+    watchlist = {
+        "Hervé Koffi": "kouakou-herve-koffi",
         "Jordan Lefort": "jordan-lefort"
     }
 
-    for name, slug in targets.items():
-        p_lim, p_rare = get_market_data(slug)
+    for name, slug in watchlist.items():
+        p_lim, p_rare = get_market_data(slug, st.session_state['final_token'])
         
-        if p_lim is not None and p_rare is not None:
-            ratio = p_rare / p_lim
-            col1, col2, col3, col4 = st.columns([2, 1, 1, 2])
-            with col1: st.markdown(f"**{name}**")
-            with col2: st.write(f"{p_lim}€")
-            with col3: st.write(f"{p_rare}€")
-            with col4:
-                if ratio < 4.0:
-                    st.success(f"🔥 Ratio: {ratio:.2f}")
-                else:
-                    st.info(f"⚖️ Ratio: {ratio:.2f}")
-        else:
-            st.warning(f"⏳ Pas de prix (Buy Now) pour {name}. Vérifie si des cartes sont en vente.")
-    
-    # Création d'un tableau propre
-    for name, slug in targets.items():
-        p_lim, p_rare = get_market_data(slug)
-        
-        if p_lim and p_rare:
-            ratio = p_rare / p_lim
-            
-            col1, col2, col3, col4 = st.columns([2, 1, 1, 2])
-            with col1:
-                st.markdown(f"**{name}**")
-            with col2:
-                st.write(f"L: {p_lim}€")
-            with col3:
-                st.write(f"R: {p_rare}€")
-            with col4:
-                # La règle d'or : Gain x4 / Prix < x4
-                if ratio < 4.0:
-                    st.success(f"🔥 Ratio: {ratio:.2f} | ACHÈTE RARE")
-                else:
-                    st.info(f"⚖️ Ratio: {ratio:.2f} | Reste en Limited")
-        else:
-            st.error(f"Données indisponibles pour {name}")
-
-    if st.button("Se déconnecter"):
-        st.session_state['final_token'] = None
-        st.session_state['otp_challenge'] = None
-        st.rerun()
+        with st.container():
+            col1, col2,
