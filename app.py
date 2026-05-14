@@ -4,9 +4,9 @@ import requests
 API_URL = "https://api.sorare.com/graphql"
 
 def sorare_sign_in(email, password, otp=None, otp_session_challenge=None):
-    # MISE À JOUR : On utilise désormais 'otpSessionChallenge'
+    # CORRECTION : 'signInInput' avec un 's' minuscule !
     query = """
-    mutation SignInMutation($input: SignInInput!) {
+    mutation SignInMutation($input: signInInput!) {
       signIn(input: $input) {
         jwtToken
         otpSessionChallenge
@@ -28,43 +28,44 @@ def sorare_sign_in(email, password, otp=None, otp_session_challenge=None):
         return {"error_exception": str(e)}
 
 # --- INTERFACE ---
-st.title("🛡️ Sorare Auth 2FA (Version Challenge)")
+st.title("🛡️ Sorare Auth 2FA (Fix Majuscule)")
 
-# On adapte aussi les noms dans la mémoire de l'appli (session_state)
 if 'otp_challenge' not in st.session_state: st.session_state['otp_challenge'] = None
 if 'final_token' not in st.session_state: st.session_state['final_token'] = None
 
-# ÉTAPE 1 : Email + Pass
+# ÉTAPE 1 : Connexion
 if not st.session_state['otp_challenge'] and not st.session_state['final_token']:
     with st.form("login_form"):
-        u_email = st.text_input("Email", value="jacques.troispoils@gmail.com") # J'ai pré-rempli selon ton screen
+        u_email = st.text_input("Email", value="jacques.troispoils@gmail.com")
         u_pass = st.text_input("Mot de passe", type="password")
         submit = st.form_submit_button("Lancer la connexion")
         
         if submit:
             res = sorare_sign_in(u_email, u_pass)
             
+            # Gestion des erreurs de schéma (le message rouge)
             if "errors" in res and not res.get("data"):
-                st.error(f"Erreur schéma : {res['errors'][0]['message']}")
+                st.error(f"Erreur de syntaxe API : {res['errors'][0]['message']}")
             else:
                 data = res.get('data', {}).get('signIn', {})
-                if data.get('otpSessionChallenge'):
-                    # Succès étape 1 !
-                    st.session_state['otp_challenge'] = data['otpSessionChallenge']
-                    st.session_state['temp_email'] = u_email
-                    st.session_state['temp_pass'] = u_pass
-                    st.rerun()
-                elif data.get('jwtToken'):
-                    st.session_state['final_token'] = data['jwtToken']
-                    st.rerun()
+                if data:
+                    if data.get('otpSessionChallenge'):
+                        st.session_state['otp_challenge'] = data['otpSessionChallenge']
+                        st.session_state['temp_email'] = u_email
+                        st.session_state['temp_pass'] = u_pass
+                        st.rerun()
+                    elif data.get('jwtToken'):
+                        st.session_state['final_token'] = data['jwtToken']
+                        st.rerun()
+                    elif data.get('errors'):
+                        st.error(f"Erreur d'identifiants : {data['errors'][0]['message']}")
                 else:
-                    msg = data.get('errors', [{'message': 'Identifiants invalides'}])[0]['message']
-                    st.error(f"Erreur : {msg}")
+                    st.error("Réponse vide de l'API. Vérifie ton mot de passe.")
 
-# ÉTAPE 2 : Code OTP
+# ÉTAPE 2 : OTP
 elif st.session_state['otp_challenge'] and not st.session_state['final_token']:
     with st.form("otp_form"):
-        st.warning("📱 Code 2FA requis (Google Authenticator)")
+        st.warning("📱 Code 2FA requis")
         otp_code = st.text_input("Saisir les 6 chiffres")
         submit_otp = st.form_submit_button("Valider")
         
@@ -76,20 +77,20 @@ elif st.session_state['otp_challenge'] and not st.session_state['final_token']:
                 otp_session_challenge=st.session_state['otp_challenge']
             )
             data = res.get('data', {}).get('signIn', {})
-            if data.get('jwtToken'):
+            if data and data.get('jwtToken'):
                 st.session_state['final_token'] = data['jwtToken']
-                st.success("✅ Enfin connecté !")
                 st.rerun()
             else:
-                st.error("Code OTP incorrect ou expiré.")
+                st.error("Code incorrect.")
                 if st.button("Retour"):
                     st.session_state['otp_challenge'] = None
                     st.rerun()
 
-# ÉTAPE 3 : État Connecté
+# ÉTAPE 3 : Succès
 if st.session_state['final_token']:
     st.balloons()
-    st.success("Authentification réussie ! Le 'jwtToken' est prêt.")
+    st.success("✅ Authentification réussie !")
+    st.info("On peut maintenant passer aux prix de Koffi et Lefort.")
     if st.button("Se déconnecter"):
         st.session_state['final_token'] = None
         st.session_state['otp_challenge'] = None
