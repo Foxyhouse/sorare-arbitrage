@@ -35,15 +35,17 @@ def get_market_data(slug, jwt_token):
         "Content-Type": "application/json"
     }
     
-    # NOUVELLE STRATÉGIE : On interroge 'cards' directement à la racine
-    # On filtre par playerSlugs pour avoir les prix de Koffi ou Lefort
+    # NOUVELLE STRATÉGIE : On demande les 'tokens' (le nom technique des cartes)
+    # On cherche ceux qui sont en vente (listingType: FIXED_PRICE ou simplement onSale)
     query = """
     query GetMarketFloor($slug: String!) {
-      cards(playerSlugs: [$slug], rarities: [limited, rare], onSale: true, first: 50) {
+      tokens(playerSlugs: [$slug], rarities: [limited, rare], first: 50) {
         nodes {
           rarity
-          amount {
-            eur
+          marketListing {
+            price {
+              eur
+            }
           }
         }
       }
@@ -53,33 +55,37 @@ def get_market_data(slug, jwt_token):
         response = requests.post(API_URL, json={'query': query, 'variables': {'slug': slug}}, headers=headers)
         res_json = response.json()
         
-        # On garde le debug au cas où
+        # On met à jour le debug pour voir si 'tokens' passe
         st.session_state['last_debug'] = res_json 
         
         if "errors" in res_json:
             return None, None
 
-        # On récupère la liste des cartes en vente
-        cards = res_json.get('data', {}).get('cards', {}).get('nodes', [])
+        # On parcourt les jetons (tokens) trouvés
+        token_nodes = res_json.get('data', {}).get('tokens', {}).get('nodes', [])
         
         lim_prices = []
         rare_prices = []
         
-        for c in cards:
-            if c.get('amount') and c['amount'].get('eur'):
-                val = float(c['amount']['eur'])
-                if c['rarity'] == 'limited':
+        for t in token_nodes:
+            # On vérifie s'il y a un prix de vente direct (marketListing)
+            listing = t.get('marketListing')
+            if listing and listing.get('price') and listing['price'].get('eur'):
+                val = float(listing['price']['eur'])
+                if t['rarity'] == 'limited':
                     lim_prices.append(val)
-                elif c['rarity'] == 'rare':
+                elif t['rarity'] == 'rare':
                     rare_prices.append(val)
         
-        # On calcule les prix planchers
+        # Floor prices
         p_lim = min(lim_prices) if lim_prices else None
         p_rare = min(rare_prices) if rare_prices else None
         
         return p_lim, p_rare
     except:
         return None, None
+
+
 # --- INTERFACE ---
 
 st.set_page_config(page_title="Sorare Bot V3", page_icon="🕵️‍♂️")
