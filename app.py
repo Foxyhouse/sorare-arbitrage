@@ -4,10 +4,11 @@ import requests
 API_URL = "https://api.sorare.com/graphql"
 
 def sorare_sign_in(email, password, otp=None, otp_session_token=None):
+    # CHANGEMENT ICI : 'token' devient 'jwtToken'
     query = """
     mutation SignInMutation($input: SignInInput!) {
       signIn(input: $input) {
-        token
+        jwtToken
         otpSessionToken
         errors { message }
       }
@@ -20,47 +21,70 @@ def sorare_sign_in(email, password, otp=None, otp_session_token=None):
         input_data["otpSessionToken"] = otp_session_token
 
     try:
-        # Ajout d'un User-Agent pour éviter d'être bloqué comme un robot
-        headers = {"User-Agent": "Mozilla/5.0 (SorareArbitrageBot/1.0)"}
+        headers = {"User-Agent": "SorareArbitrageBot/1.0"}
         response = requests.post(API_URL, json={'query': query, 'variables': {"input": input_data}}, headers=headers)
         return response.json()
     except Exception as e:
         return {"error_exception": str(e)}
 
-st.title("🛡️ Débug Connexion Sorare")
+# --- INTERFACE ---
+st.title("🛡️ Sorare Auth 2FA (Version Corrigée)")
 
 if 'otp_token' not in st.session_state: st.session_state['otp_token'] = None
 if 'final_token' not in st.session_state: st.session_state['final_token'] = None
 
-# ÉTAPE 1
+# ÉTAPE 1 : Identifiants
 if not st.session_state['otp_token'] and not st.session_state['final_token']:
-    u_email = st.text_input("Email")
-    u_pass = st.text_input("Mot de passe", type="password")
-    
-    if st.button("Lancer la connexion"):
-        res = sorare_sign_in(u_email, u_pass)
+    with st.form("login_form"):
+        u_email = st.text_input("Email")
+        u_pass = st.text_input("Mot de passe", type="password")
+        submit = st.form_submit_button("Lancer la connexion")
         
-        # --- ZONE DE DÉBUG ---
-        st.write("🔍 Réponse brute de Sorare :", res)
-        # ---------------------
-
-        if 'errors' in res and not res.get('data'):
-             st.error(f"Erreur API (Root) : {res['errors'][0]['message']}")
-        else:
-            data = res.get('data', {}).get('signIn', {})
-            if data:
+        if submit:
+            res = sorare_sign_in(u_email, u_pass)
+            # Débogage visible si besoin
+            if "errors" in res and not res.get("data"):
+                st.error(f"Erreur schéma : {res['errors'][0]['message']}")
+            else:
+                data = res.get('data', {}).get('signIn', {})
                 if data.get('otpSessionToken'):
                     st.session_state['otp_token'] = data['otpSessionToken']
                     st.session_state['temp_email'] = u_email
                     st.session_state['temp_pass'] = u_pass
-                    st.success("Étape 1 réussie, en attente de l'OTP...")
                     st.rerun()
-                elif data.get('token'):
-                    st.session_state['final_token'] = data['token']
+                elif data.get('jwtToken'): # CHANGEMENT ICI AUSSI
+                    st.session_state['final_token'] = data['jwtToken']
                     st.rerun()
-                elif data.get('errors'):
-                    st.error(f"Erreur SignIn : {data['errors'][0]['message']}")
-            else:
-                st.error("La réponse 'signIn' est vide (None). Vérifie tes identifiants.")
+                else:
+                    msg = data.get('errors', [{'message': 'Inconnu'}])[0]['message']
+                    st.error(f"Erreur : {msg}")
 
-# (Garde le reste du code pour l'étape 2 OTP tel quel)
+# ÉTAPE 2 : OTP
+elif st.session_state['otp_token'] and not st.session_state['final_token']:
+    with st.form("otp_form"):
+        st.info("Code 2FA requis")
+        otp_code = st.text_input("Code (6 chiffres)")
+        submit_otp = st.form_submit_button("Vérifier")
+        
+        if submit_otp:
+            res = sorare_sign_in(
+                st.session_state['temp_email'], 
+                st.session_state['temp_pass'], 
+                otp=otp_code, 
+                otp_session_token=st.session_state['otp_token']
+            )
+            data = res.get('data', {}).get('signIn', {})
+            if data.get('jwtToken'): # ET ICI
+                st.session_state['final_token'] = data['jwtToken']
+                st.success("✅ Connecté !")
+                st.rerun()
+            else:
+                st.error("Code invalide.")
+
+# ÉTAPE 3 : Dashboard
+if st.session_state['final_token']:
+    st.success("Authentification réussie !")
+    if st.button("Se déconnecter"):
+        st.session_state['final_token'] = None
+        st.session_state['otp_token'] = None
+        st.rerun()
