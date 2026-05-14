@@ -164,4 +164,22 @@ else:
         p_lim, p_rare = get_market_data(slug, st.session_state['final_token'])
         
         with st.container():
-            col1, col2,
+            col1, col2, col3, col4 = st.columns([2, 1, 1, 2])
+            
+            if p_lim and p_rare:
+                ratio = p_rare / p_lim
+                col1.markdown(f"**{name}**")
+                col2.metric("Limited", f"{p_lim}€")
+                col3.metric("Rare", f"{p_rare}€")
+                
+                # Logique métier : Ratio < 4 = Opportunité
+                if ratio < 4.0:
+                    col4.success(f"🎯 Ratio: {ratio:.2f} (BUY !)")
+                else:
+                    col4.info(f"⚖️ Ratio: {ratio:.2f}")
+            else:
+                col1.markdown(f"**{name}**")
+                col4.warning("Aucune carte en vente directe.")
+        st.divider()
+
+    st.caption("Données actualisées en temps réel via Sorare API v2026")
