@@ -51,24 +51,23 @@ def sorare_sign_in(email, hashed_password=None, otp_attempt=None, otp_session_ch
         return {"errors": [{"message": str(e)}]}
 
 def get_market_data(slug, jwt_token):
-    """Récupère les prix du marché avec publicSearch: true."""
     headers = {
         "Authorization": f"Bearer {jwt_token}",
         "JWT-AUD": AUDIENCE,
         "Content-Type": "application/json"
     }
     
-    # Utilisation du fragment '... on Player' pour accéder aux cards
+    # On demande explicitement les cartes EN VENTE (onSale: true)
+    # Et on utilise 'amount' qui est le champ standard pour le prix fixe
     query = """
     query GetFloorPrices($slugs: [String!]!) {
       players(slugs: $slugs) {
         ... on Player {
           displayName
-          cards(rarities: [limited, rare], first: 50, publicSearch: true) {
+          cards(rarities: [limited, rare], first: 50, onSale: true) {
             nodes {
               rarity
-              onSale
-              priceData: amountNextStep { eur }
+              price: amount { eur }
             }
           }
         }
@@ -79,9 +78,32 @@ def get_market_data(slug, jwt_token):
         response = requests.post(API_URL, json={'query': query, 'variables': {'slugs': [slug]}}, headers=headers)
         res_json = response.json()
         
+        # Logique de récupération
         players_list = res_json.get('data', {}).get('players', [])
         if not players_list or players_list[0] is None:
             return None, None
+            
+        cards = players_list[0].get('cards', {}).get('nodes', [])
+        
+        lim_prices = []
+        rare_prices = []
+        
+        for c in cards:
+            if c.get('price') and c['price'].get('eur'):
+                val = float(c['price']['eur'])
+                if c['rarity'] == 'limited':
+                    lim_prices.append(val)
+                elif c['rarity'] == 'rare':
+                    rare_prices.append(val)
+        
+        # On prend le prix le plus bas trouvé
+        p_lim = min(lim_prices) if lim_prices else None
+        p_rare = min(rare_prices) if rare_prices else None
+        
+        return p_lim, p_rare
+    except Exception as e:
+        # En cas d'erreur, on l'affiche discrètement dans la console Streamlit
+        return None, None
             
         cards = players_list[0].get('cards', {}).get('nodes', [])
         lim_prices = []
