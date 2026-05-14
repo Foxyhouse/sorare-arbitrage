@@ -4,11 +4,11 @@ import requests
 API_URL = "https://api.sorare.com/graphql"
 
 def sorare_sign_in(email, password, otp=None, otp_session_challenge=None):
-    # MISE À JOUR : jwtToken est un objet, on demande donc { token } à l'intérieur
+    # MISE À JOUR : On ajoute l'argument (aud: "sorare") requis par le schéma 2026
     query = """
     mutation SignInMutation($input: signInInput!) {
       signIn(input: $input) {
-        jwtToken {
+        jwtToken(aud: "sorare") {
           token
         }
         otpSessionChallenge
@@ -30,12 +30,12 @@ def sorare_sign_in(email, password, otp=None, otp_session_challenge=None):
         return {"error_exception": str(e)}
 
 # --- INTERFACE ---
-st.title("🛡️ Sorare Auth 2FA (Correctif Objet JWT)")
+st.title("🛡️ Sorare Auth 2FA (Fix Argument 'aud')")
 
 if 'otp_challenge' not in st.session_state: st.session_state['otp_challenge'] = None
 if 'final_token' not in st.session_state: st.session_state['final_token'] = None
 
-# ÉTAPE 1 : Connexion
+# ÉTAPE 1 : Connexion initiale
 if not st.session_state['otp_challenge'] and not st.session_state['final_token']:
     with st.form("login_form"):
         u_email = st.text_input("Email", value="jacques.troispoils@gmail.com")
@@ -56,7 +56,6 @@ if not st.session_state['otp_challenge'] and not st.session_state['final_token']
                         st.session_state['temp_pass'] = u_pass
                         st.rerun()
                     elif data.get('jwtToken'): 
-                        # On récupère le token à l'intérieur de l'objet
                         st.session_state['final_token'] = data['jwtToken']['token']
                         st.rerun()
                     elif data.get('errors'):
@@ -64,7 +63,7 @@ if not st.session_state['otp_challenge'] and not st.session_state['final_token']
                 else:
                     st.error("Réponse vide.")
 
-# ÉTAPE 2 : OTP
+# ÉTAPE 2 : Saisie du code OTP
 elif st.session_state['otp_challenge'] and not st.session_state['final_token']:
     with st.form("otp_form"):
         st.warning("📱 Code 2FA requis")
@@ -72,6 +71,7 @@ elif st.session_state['otp_challenge'] and not st.session_state['final_token']:
         submit_otp = st.form_submit_button("Valider")
         
         if submit_otp:
+            # Note : on réutilise la même fonction qui contient maintenant (aud: "sorare")
             res = sorare_sign_in(
                 st.session_state['temp_email'], 
                 st.session_state['temp_pass'], 
@@ -79,9 +79,17 @@ elif st.session_state['otp_challenge'] and not st.session_state['final_token']:
                 otp_session_challenge=st.session_state['otp_challenge']
             )
             data = res.get('data', {}).get('signIn', {})
-            # Même logique ici pour l'étape 2
             if data and data.get('jwtToken'):
                 st.session_state['final_token'] = data['jwtToken']['token']
                 st.rerun()
             else:
-                st.error("Code incorrect.")
+                st.error("Code incorrect ou expiré.")
+
+# ÉTAPE 3 : Succès
+if st.session_state['final_token']:
+    st.balloons()
+    st.success("✅ Enfin ! Authentification réussie avec Audience validée.")
+    if st.button("Se déconnecter"):
+        st.session_state['final_token'] = None
+        st.session_state['otp_challenge'] = None
+        st.rerun()
