@@ -148,7 +148,7 @@ if st.session_state['final_token']:
     
     # Liste des slugs à vérifier (parfois il faut ajouter l'année de naissance si doublon)
     targets = {
-        "Hervé Koffi": "herve-koffi", 
+        "Hervé Koffi": "kouakou-herve-koffi", 
         "Jordan Lefort": "jordan-lefort"
     }
 
