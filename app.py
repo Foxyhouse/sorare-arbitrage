@@ -98,12 +98,11 @@ if st.session_state['final_token']:
     }
 
     def get_market_data(slug):
-        # Requête mise à jour pour le marché secondaire (Floor Price)
+        # On utilise 'players' avec une liste [slug] comme demandé par l'API
         query = """
-        query GetFloorPrices($slug: String!) {
-          player(slug: $slug) {
+        query GetFloorPrices($slugs: [String!]!) {
+          players(slugs: $slugs) {
             displayName
-            # On cherche les cartes en vente les moins chères
             cards(rarities: [limited, rare], first: 50) {
               nodes {
                 rarity
@@ -115,38 +114,38 @@ if st.session_state['final_token']:
         }
         """
         try:
-            response = requests.post(API_URL, json={'query': query, 'variables': {'slug': slug}}, headers=headers)
+            # On envoie le slug dans une liste : [slug]
+            response = requests.post(API_URL, json={'query': query, 'variables': {'slugs': [slug]}}, headers=headers)
             res_json = response.json()
             
-            # DEBUG : On affiche la réponse si ça échoue
             if "errors" in res_json:
                 st.error(f"Erreur API pour {slug} : {res_json['errors'][0]['message']}")
                 return None, None
 
-            player_data = res_json.get('data', {}).get('player')
-            if not player_data:
-                st.warning(f"Joueur non trouvé : {slug}")
+            # On récupère le premier (et seul) joueur de la liste retournée
+            players_list = res_json.get('data', {}).get('players', [])
+            if not players_list:
                 return None, None
-
+            
+            player_data = players_list[0]
             cards = player_data.get('cards', {}).get('nodes', [])
             
-            # On filtre manuellement pour trouver le prix mini (Floor)
-            lim_prices = [c['priceEur'] for c in cards if c['rarity'] == 'limited' and c['onSale'] and c['priceEur']]
-            rare_prices = [c['priceEur'] for c in cards if c['rarity'] == 'rare' and c['onSale'] and c['priceEur']]
+            # Extraction des prix mini
+            lim_prices = [c['priceEur']['eur'] for c in cards if c['rarity'] == 'limited' and c['onSale'] and c['priceEur']]
+            rare_prices = [c['priceEur']['eur'] for c in cards if c['rarity'] == 'rare' and c['onSale'] and c['priceEur']]
             
             p_lim = min(lim_prices) if lim_prices else None
             p_rare = min(rare_prices) if rare_prices else None
             
             return p_lim, p_rare
         except Exception as e:
-            st.error(f"Erreur technique : {str(e)}")
             return None, None
 
-    # --- TON MONITORING ---
+    # --- TON MONITORING (Slugs Corrigés) ---
     st.divider()
     st.subheader("🕵️‍♂️ Opportunités d'Arbitrage en Direct")
     
-    # Liste des slugs à vérifier (parfois il faut ajouter l'année de naissance si doublon)
+    # On utilise les bons identifiants détectés
     targets = {
         "Hervé Koffi": "kouakou-herve-koffi", 
         "Jordan Lefort": "jordan-lefort"
@@ -155,19 +154,21 @@ if st.session_state['final_token']:
     for name, slug in targets.items():
         p_lim, p_rare = get_market_data(slug)
         
-        if p_lim is not None and p_rare is not None:
+        if p_lim and p_rare:
             ratio = p_rare / p_lim
             col1, col2, col3, col4 = st.columns([2, 1, 1, 2])
             with col1: st.markdown(f"**{name}**")
-            with col2: st.write(f"L: {p_lim}€")
-            with col3: st.write(f"R: {p_rare}€")
+            with col2: st.write(f"{p_lim}€")
+            with col3: st.write(f"{p_rare}€")
             with col4:
                 if ratio < 4.0:
-                    st.success(f"🔥 Ratio: {ratio:.2f} | ACHÈTE RARE")
+                    st.success(f"🔥 Ratio: {ratio:.2f}")
                 else:
                     st.info(f"⚖️ Ratio: {ratio:.2f}")
         else:
-            st.warning(f"⏳ Pas de cartes en vente actuellement pour {name} (ou slug erroné).")
+            st.warning(f"⏳ Pas de prix trouvés pour {name}. Vérifie si des cartes sont en vente.") 
+            
+    
     # Création d'un tableau propre
     for name, slug in targets.items():
         p_lim, p_rare = get_market_data(slug)
