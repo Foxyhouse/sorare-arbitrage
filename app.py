@@ -1,56 +1,92 @@
 import streamlit as st
+import requests
 
-st.set_page_config(page_title="Sorare Arbitrage 2026", layout="wide")
+# L'unique adresse pour parler à Sorare
+API_URL = "https://api.sorare.com/graphql"
 
-st.title("⚽ Sorare Arbitrage : Limited vs Rare (Ligue 1)")
-st.write("Compare la rentabilité réelle des paliers Hot Streak.")
+def sorare_sign_in(email, password, otp=None, otp_session_token=None):
+    # La mutation officielle pour se connecter
+    query = """
+    mutation SignInMutation($input: SignInInput!) {
+      signIn(input: $input) {
+        token
+        otpSessionToken
+        errors { message }
+      }
+    }
+    """
+    input_data = {"email": email, "password": password}
+    if otp:
+        input_data["otp"] = otp
+    if otp_session_token:
+        input_data["otpSessionToken"] = otp_session_token
 
-# --- DONNÉES OFFICIELLES 2026 ---
-REWARD_RATIO = 3.0  # $20 vs $5
-BONUS_RARE = 1.10   # +10% de bonus de rareté
+    response = requests.post(API_URL, json={'query': query, 'variables': {"input": input_data}})
+    return response.json()
 
-# --- CALCULS ---
-def get_analysis(name, p_lim, p_rare, score_l15):
-    ratio_prix = p_rare / p_lim
+# --- INTERFACE DE L'APPLICATION ---
+st.title("🛡️ Test de Connexion Sorare")
+
+# Gestion des états de la session (pour ne pas tout perdre à chaque clic)
+if 'otp_token' not in st.session_state:
+    st.session_state['otp_token'] = None
+if 'final_token' not in st.session_state:
+    st.session_state['final_token'] = None
+
+# ÉTAPE 1 : Saisie Email + Mot de passe
+if not st.session_state['otp_token'] and not st.session_state['final_token']:
+    st.subheader("1. Identifiants")
+    u_email = st.text_input("Ton Email Sorare")
+    u_pass = st.text_input("Ton Mot de passe", type="password")
     
-    # Score brut nécessaire pour P1 (360 Lim / 400 Rare)
-    brut_necessaire_lim = 360 / 1.05 # Saison +5%
-    brut_necessaire_rare = 400 / (1.05 + 0.10) # Saison + Rareté
-    
-    st.subheader(f"📊 Analyse pour {name}")
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.metric("Ratio de Prix", f"x{ratio_prix:.2f}")
-        if ratio_prix < REWARD_RATIO:
-            st.success("✅ Ratio Rentable (< 4)")
+    if st.button("Lancer la connexion"):
+        res = sorare_sign_in(u_email, u_pass)
+        data = res.get('data', {}).get('signIn', {})
+        
+        if data.get('otpSessionToken'):
+            # Sorare demande le code 2FA
+            st.session_state['otp_token'] = data['otpSessionToken']
+            st.session_state['temp_email'] = u_email
+            st.session_state['temp_pass'] = u_pass
+            st.rerun()
+        elif data.get('token'):
+            # Pas de 2FA (rare, mais possible)
+            st.session_state['final_token'] = data['token']
+            st.rerun()
         else:
-            st.error("❌ Rare trop chère")
+            # Erreur (mauvais pass, etc.)
+            st.error(f"Erreur : {data.get('errors')}")
 
-    with col2:
-        diff_difficulte = (brut_necessaire_rare / brut_necessaire_lim - 1) * 100
-        st.metric("Surcoût Sportif", f"+{diff_difficulte:.1f}%")
-        st.write("Points bruts pour P1")
+# ÉTAPE 2 : Saisie du code OTP (2FA)
+elif st.session_state['otp_token'] and not st.session_state['final_token']:
+    st.subheader("2. Double Authentification")
+    st.warning("Ouvre ton application d'authentification (Google Auth, etc.)")
+    otp_code = st.text_input("Code à 6 chiffres", placeholder="123456")
+    
+    if st.button("Valider le code"):
+        res = sorare_sign_in(
+            st.session_state['temp_email'], 
+            st.session_state['temp_pass'], 
+            otp=otp_code, 
+            otp_session_token=st.session_state['otp_token']
+        )
+        data = res.get('data', {}).get('signIn', {})
+        
+        if data.get('token'):
+            st.session_state['final_token'] = data['token']
+            st.success("✅ BRAVO ! Authentification réussie.")
+            st.rerun()
+        else:
+            st.error("Code invalide. Réessaie.")
+            if st.button("Recommencer au début"):
+                st.session_state['otp_token'] = None
+                st.rerun()
 
-    with col3:
-        roi_efficiency = REWARD_RATIO / ratio_prix
-        st.metric("Efficience du Cash", f"x{roi_efficiency:.2f}")
-        st.write("Gain potentiel vs Limited")
-
-# --- INTERFACE ---
-st.divider()
-st.sidebar.header("Paramètres Joueurs")
-
-# Hervé Koffi
-st.sidebar.subheader("Hervé Koffi")
-k_lim = st.sidebar.number_input("Prix Limited (Koffi)", value=5.70)
-k_rare = st.sidebar.number_input("Prix Rare (Koffi)", value=15.90)
-
-# Jordan Lefort
-st.sidebar.subheader("Jordan Lefort")
-l_lim = st.sidebar.number_input("Prix Limited (Lefort)", value=0.60)
-l_rare = st.sidebar.number_input("Prix Rare (Lefort)", value=1.20)
-
-get_analysis("Hervé Koffi", k_lim, k_rare, 59)
-st.divider()
-get_analysis("Jordan Lefort", l_lim, l_rare, 51)
+# ÉTAPE 3 : État Connecté
+if st.session_state['final_token']:
+    st.success("Tu es officiellement connecté à l'API.")
+    st.write("C'est ce jeton (token) qui nous permettra de demander les prix en temps réel.")
+    if st.button("Se déconnecter"):
+        st.session_state['final_token'] = None
+        st.session_state['otp_token'] = None
+        st.rerun()
