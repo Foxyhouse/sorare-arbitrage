@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import bcrypt
 import pandas as pd
+import json
 
 # --- CONFIGURATION API ---
 API_URL = "https://api.sorare.com/graphql"
@@ -26,14 +27,14 @@ def sorare_sign_in(email, hashed_password=None, otp_attempt=None, otp_session_ch
     input_data = {"otpSessionChallenge": otp_session_challenge, "otpAttempt": otp_attempt} if otp_session_challenge else {"email": email, "password": hashed_password}
     return requests.post(API_URL, json={'query': query, 'variables': {"input": input_data}}).json()
 
-def get_raw_flux_200(jwt_token):
+def run_audit_query(jwt_token):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE, "Content-Type": "application/json"}
     
-    # On demande les 200 dernières offres brutes
+    # On tente une requête ultra-basique pour voir ce qui sort du tuyau
     query = """
-    query GetMarketFlux200 {
+    query AuditMarket {
       tokens {
-        liveSingleSaleOffers(first: 200) {
+        liveSingleSaleOffers(first: 50) {
           nodes {
             senderSide {
               anyCards {
@@ -43,43 +44,52 @@ def get_raw_flux_200(jwt_token):
               }
             }
             receiverSide { amounts { eurCents } }
-            createdAt
           }
         }
       }
     }
     """
     try:
-        res = requests.post(API_URL, json={'query': query}, headers=headers).json()
-        nodes = res.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
+        response = requests.post(API_URL, json={'query': query}, headers=headers)
+        res_json = response.json()
         
+        # STOCKAGE DU DEBUG BRUT
+        st.session_state['full_api_response'] = res_json
+        
+        if "errors" in res_json:
+            return [], f"L'API a renvoyé une erreur : {res_json['errors'][0]['message']}"
+            
+        nodes = res_json.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
+        
+        if not nodes:
+            return [], "La requête a réussi mais la liste 'nodes' est vide (0 offre trouvée)."
+
         raw_list = []
         for n in nodes:
             cards = n.get('senderSide', {}).get('anyCards', [])
             if cards:
                 c = cards[0]
                 raw_list.append({
-                    "Date": n.get('createdAt'),
-                    "Joueur": c.get('player', {}).get('displayName'),
+                    "Joueur": c.get('player', {}).get('displayName', 'N/A'),
                     "Slug": c.get('slug'),
                     "Rareté": c.get('rarityTyped'),
                     "Prix (€)": float(n.get('receiverSide', {}).get('amounts', {}).get('eurCents', 0)) / 100
                 })
-        return raw_list
-    except: return []
+        return raw_list, None
+    except Exception as e:
+        return [], f"Erreur de connexion : {str(e)}"
 
 # --- UI ---
-st.set_page_config(page_title="Vérification Flux 200", layout="wide")
-st.title("🔎 Audit du Flux de Marché (Top 200)")
+st.set_page_config(page_title="Audit Debug Sorare", layout="wide")
+st.title("🔎 Audit Force Brute du Marché")
 
 if 'token' not in st.session_state: st.session_state['token'] = None
 
 if not st.session_state['token']:
-    # Bloc de connexion simplifié
     with st.form("login"):
         e = st.text_input("Email", value="jacques.troispoils@gmail.com")
         p = st.text_input("Pass", type="password")
-        if st.form_submit_button("Extraire les 200"):
+        if st.form_submit_button("Lancer l'audit"):
             salt = get_user_salt(e)
             if salt:
                 hp = bcrypt.hashpw(p.encode(), salt.encode()).decode()
@@ -88,20 +98,35 @@ if not st.session_state['token']:
                     st.session_state['token'] = res['data']['signIn']['jwtToken']['token']
                     st.rerun()
 else:
-    if st.button("🔄 Rafraîchir les données"):
-        st.rerun()
-
-    with st.spinner("Récupération des 200 dernières offres..."):
-        data = get_raw_flux_200(st.session_state['token'])
+    st.sidebar.button("🔄 Forcer Refresh", on_click=lambda: st.rerun())
     
+    with st.status("Interrogation de l'API Sorare...") as status:
+        data, error_msg = run_audit_query(st.session_state['token'])
+        if error_msg:
+            status.update(label="Échec de l'audit", state="error")
+            st.error(error_msg)
+        else:
+            status.update(label="Audit réussi", state="complete")
+
     if data:
+        st.success(f"Capture de {len(data)} offres en cours")
         df = pd.DataFrame(data)
-        
-        # Statistiques rapides
-        st.info(f"Nombre d'offres récupérées : {len(df)}")
-        st.write("Répartition par rareté :", df['Rareté'].value_counts())
-        
-        # Affichage du tableau interactif
-        st.dataframe(df, use_container_width=True, height=600)
+        st.dataframe(df, use_container_width=True)
+    
+    # ZONE DE DEBUG CRITIQUE
+    st.divider()
+    st.subheader("🛠️ Console de diagnostic (JSON Brut)")
+    if 'full_api_response' in st.session_state:
+        st.write("Dernière réponse reçue du serveur :")
+        st.json(st.session_state['full_api_response'])
     else:
-        st.error("Aucune donnée n'a pu être extraite. Vérifie la console ou le debug.")
+        st.info("Aucune réponse JSON stockée pour le moment.")
+
+    # Tentative d'explication si vide
+    if not data and not error_msg:
+        st.warning("""
+        ### Pourquoi c'est vide ?
+        L'API Sorare semble restreindre l'accès à `liveSingleSaleOffers` sans paramètres plus précis (comme un sport ou un dictionnaire de slugs). 
+        
+        **Regarde bien le JSON en bas :** - Si tu vois `data: { tokens: { liveSingleSaleOffers: { nodes: [] } } }`, c'est que Sorare bloque le flux "anonyme" global.
+        """)
