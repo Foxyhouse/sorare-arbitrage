@@ -43,7 +43,8 @@ def get_limited_floor(player_slug, jwt_token):
     try:
         res = requests.post(API_URL, json={'query': query, 'variables': {'slug': player_slug}}, headers=headers).json()
         nodes = res.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
-        prices = [float(n['receiverSide']['amounts']['eurCents'])/100 for n in nodes if n.get('receiverSide', {}).get('amounts')]
+        # Sécurité : On filtre uniquement les offres qui ont un prix non nul
+        prices = [float(n['receiverSide']['amounts']['eurCents'])/100 for n in nodes if n.get('receiverSide', {}).get('amounts') and n['receiverSide']['amounts'].get('eurCents')]
         return min(prices) if prices else None
     except: return None
 
@@ -68,9 +69,13 @@ def scan_arbitrage_live(jwt_token):
         nodes = res.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
         findings = []
         for n in nodes:
+            # SÉCURITÉ : On vérifie que le prix existe avant de continuer
+            eur_cents = n.get('receiverSide', {}).get('amounts', {}).get('eurCents')
+            if eur_cents is None:
+                continue
+
             cards = n.get('senderSide', {}).get('anyCards', [])
             if cards and str(cards[0].get('rarityTyped')).lower() == 'rare':
-                # Sécurité sur la date
                 raw_date = n.get('startDate', "")
                 try:
                     f_date = datetime.fromisoformat(raw_date.replace('Z', '+00:00')).strftime("%H:%M")
@@ -81,27 +86,59 @@ def scan_arbitrage_live(jwt_token):
                     "Vente": f_date,
                     "Joueur": cards[0].get('anyPlayer', {}).get('displayName'),
                     "Slug": cards[0].get('anyPlayer', {}).get('slug'),
-                    "Prix Rare (€)": float(n['receiverSide']['amounts']['eurCents']) / 100
+                    "Prix Rare (€)": float(eur_cents) / 100
                 })
         
-        for item in findings[:10]:
+        # On calcule le ratio pour les Rares trouvées
+        for item in findings[:15]:
             floor = get_limited_floor(item['Slug'], jwt_token)
             item['Floor Limited (€)'] = floor
-            item['Ratio'] = round(item['Prix Rare (€)'] / floor, 2) if floor else None
+            if floor and floor > 0:
+                item['Ratio'] = round(item['Prix Rare (€)'] / floor, 2)
+            else:
+                item['Ratio'] = None
         return findings
     except Exception as e:
         st.error(f"Erreur technique : {e}")
         return []
 
 # --- INTERFACE ---
-st.set_page_config(page_title="Arbitrage Sorare 2026", layout="wide")
+st.set_page_config(page_title="Scanner Arbitrage", layout="wide")
 st.title("⚽ Scanner d'Arbitrage (Flux 24h)")
 
 if 'token' not in st.session_state: st.session_state['token'] = None
+if 'otp_challenge' not in st.session_state: st.session_state['otp_challenge'] = None
 
-# ... (Mettre ici le bloc de connexion que tu utilisais, il fonctionne très bien) ...
-
-if st.session_state['token']:
+if not st.session_state['token']:
+    if not st.session_state['otp_challenge']:
+        with st.form("login"):
+            u_email = st.text_input("Email", value="jacques.troispoils@gmail.com")
+            u_pwd = st.text_input("Mot de passe", type="password")
+            if st.form_submit_button("Lancer le Scanner"):
+                salt = get_user_salt(u_email)
+                if salt:
+                    hpwd = bcrypt.hashpw(u_pwd.encode(), salt.encode()).decode()
+                    res = sorare_sign_in(u_email, hpwd)
+                    data = res.get('data', {}).get('signIn', {})
+                    if data.get('otpSessionChallenge'):
+                        st.session_state['otp_challenge'] = data['otpSessionChallenge']
+                        st.session_state['temp_email'] = u_email
+                        st.rerun()
+                    elif data.get('jwtToken'):
+                        st.session_state['token'] = data['jwtToken']['token']
+                        st.rerun()
+                    else: st.error("Identifiants incorrects.")
+                else: st.error("Compte introuvable.")
+    else:
+        with st.form("otp"):
+            code = st.text_input("Code OTP")
+            if st.form_submit_button("Valider"):
+                res = sorare_sign_in(st.session_state['temp_email'], otp_attempt=code, otp_session_challenge=st.session_state['otp_challenge'])
+                if res.get('data', {}).get('signIn', {}).get('jwtToken'):
+                    st.session_state['token'] = res['data']['signIn']['jwtToken']['token']
+                    st.rerun()
+else:
+    st.sidebar.button("Déconnexion", on_click=lambda: st.session_state.clear())
     if st.button("🔄 Rafraîchir le flux"):
         st.rerun()
 
@@ -118,4 +155,4 @@ if st.session_state['token']:
 
         st.dataframe(df.style.map(color_ratio, subset=['Ratio']), use_container_width=True)
     else:
-        st.info("Recherche de Rares en cours...")
+        st.info("Aucune Rare avec prix détectée. Réessaie.")
