@@ -104,26 +104,29 @@ def scan_and_alert(jwt_token):
                 f_lim, f_rare = get_segmented_floors(card['anyPlayer']['slug'], is_in, jwt_token)
                 ratio = round(p_now / f_lim, 2) if f_lim else 99
                 
+                # Alerte Telegram
                 if ratio < 3.5 and card['slug'] not in st.session_state['sent_alerts']:
                     send_telegram_alert(f"🚀 *PÉPITE !* {card['anyPlayer']['displayName']} à {p_now}€ (Ratio: {ratio})\n[Lien](https://sorare.com/football/cards/{card['slug']})")
                     st.session_state['sent_alerts'].add(card['slug'])
 
+                # Ajout au tableau complet
                 findings.append({
                     "🛒": f"https://sorare.com/football/cards/{card['slug']}",
                     "Vente": n['startDate'],
                     "Joueur": card['anyPlayer']['displayName'],
-                    "Cat": "🟢 In" if is_in else "⚪ Cl",
-                    "Prix": p_now,
-                    "F.Rare": f_rare,
-                    "Ratio": ratio
+                    "Catégorie": "🟢 In-Season" if is_in else "⚪ Classic",
+                    "Prix (€)": p_now,
+                    "Floor Rare (€)": f_rare,
+                    "Floor Lim (€)": f_lim,
+                    "Ratio": ratio if ratio != 99 else None
                 })
         return sorted(findings, key=lambda x: x['Vente'], reverse=True)
     except: return []
 
-# --- INTERFACE (LOGIQUE STRICTE) ---
+# --- INTERFACE ---
 st.set_page_config(page_title="Sniper Pro 2026", layout="wide")
 
-# CAS 1 : Pas de token -> Formulaire de connexion
+# CAS 1 : Connexion
 if st.session_state['token'] is None:
     st.title("🔐 Connexion Sorare")
     if not st.session_state['otp_needed']:
@@ -153,19 +156,35 @@ if st.session_state['token'] is None:
 # CAS 2 : Connecté -> Scanner + Auto-refresh
 else:
     st.sidebar.success("Scanner Actif")
-    st.sidebar.write(f"🕒 {datetime.now().strftime('%H:%M:%S')}")
+    st.sidebar.write(f"🕒 Dernière màj : {datetime.now().strftime('%H:%M:%S')}")
     if st.sidebar.button("Déconnexion"):
         st.session_state.clear()
         st.rerun()
 
     data = scan_and_alert(st.session_state['token'])
     if data:
-        st.dataframe(pd.DataFrame(data), 
-                     column_config={"🛒": st.column_config.LinkColumn("🛒", display_text="Ouvrir")}, 
-                     use_container_width=True, hide_index=True)
+        df = pd.DataFrame(data)
+        
+        # --- RETOUR DU DESIGN ---
+        def style_df(row):
+            styles = [''] * len(row)
+            # Vert si ratio < 4.0 (Colonne 7 = Ratio)
+            if row['Ratio'] is not None and float(row['Ratio']) < 4.0:
+                styles[7] = 'background-color: #d4edda; color: #155724; font-weight: bold'
+            # Jaune/Orange si Undercut (Colonne 4 = Prix)
+            if row['Floor Rare (€)'] is not None and row['Prix (€)'] <= row['Floor Rare (€)']:
+                styles[4] = 'background-color: #fff3cd; color: #856404; font-weight: bold'
+            return styles
+
+        st.dataframe(
+            df.style.apply(style_df, axis=1), 
+            column_config={"🛒": st.column_config.LinkColumn("Lien", display_text="Ouvrir")}, 
+            use_container_width=True, 
+            hide_index=True
+        )
     else:
         st.info("Recherche de pépites...")
     
-    # L'auto-refresh ne se déclenche QUE ici
+    # Auto-refresh de 60 secondes
     time.sleep(60)
     st.rerun()
