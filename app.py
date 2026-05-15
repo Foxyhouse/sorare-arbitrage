@@ -2,7 +2,6 @@ import streamlit as st
 import requests
 import bcrypt
 import pandas as pd
-import json
 
 # --- CONFIGURATION API ---
 API_URL = "https://api.sorare.com/graphql"
@@ -30,20 +29,25 @@ def sorare_sign_in(email, hashed_password=None, otp_attempt=None, otp_session_ch
 def run_audit_query(jwt_token):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE, "Content-Type": "application/json"}
     
-    # On tente une requête ultra-basique pour voir ce qui sort du tuyau
+    # REQUÊTE MISE À JOUR : 'anyPlayer' au lieu de 'player' [Source: AnyCardInterface schema]
+    # On filtre sur FOOTBALL pour plus de pertinence
     query = """
     query AuditMarket {
       tokens {
-        liveSingleSaleOffers(first: 50) {
+        liveSingleSaleOffers(first: 50, sport: FOOTBALL) {
           nodes {
             senderSide {
               anyCards {
                 slug
                 rarityTyped
-                player { displayName }
+                anyPlayer { 
+                  displayName 
+                  slug
+                }
               }
             }
             receiverSide { amounts { eurCents } }
+            createdAt
           }
         }
       }
@@ -52,36 +56,33 @@ def run_audit_query(jwt_token):
     try:
         response = requests.post(API_URL, json={'query': query}, headers=headers)
         res_json = response.json()
-        
-        # STOCKAGE DU DEBUG BRUT
         st.session_state['full_api_response'] = res_json
         
         if "errors" in res_json:
-            return [], f"L'API a renvoyé une erreur : {res_json['errors'][0]['message']}"
+            return [], f"Erreur API : {res_json['errors'][0]['message']}"
             
         nodes = res_json.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
         
-        if not nodes:
-            return [], "La requête a réussi mais la liste 'nodes' est vide (0 offre trouvée)."
-
         raw_list = []
         for n in nodes:
             cards = n.get('senderSide', {}).get('anyCards', [])
             if cards:
                 c = cards[0]
+                player_info = c.get('anyPlayer', {}) # Correction ici
                 raw_list.append({
-                    "Joueur": c.get('player', {}).get('displayName', 'N/A'),
-                    "Slug": c.get('slug'),
+                    "Date": n.get('createdAt'),
+                    "Joueur": player_info.get('displayName', 'N/A'),
+                    "Slug Joueur": player_info.get('slug', 'N/A'),
                     "Rareté": c.get('rarityTyped'),
                     "Prix (€)": float(n.get('receiverSide', {}).get('amounts', {}).get('eurCents', 0)) / 100
                 })
         return raw_list, None
     except Exception as e:
-        return [], f"Erreur de connexion : {str(e)}"
+        return [], f"Erreur : {str(e)}"
 
-# --- UI ---
-st.set_page_config(page_title="Audit Debug Sorare", layout="wide")
-st.title("🔎 Audit Force Brute du Marché")
+# --- UI STREAMLIT ---
+st.set_page_config(page_title="Audit Flux Sorare", layout="wide")
+st.title("🔎 Audit du Flux de Marché Football")
 
 if 'token' not in st.session_state: st.session_state['token'] = None
 
@@ -98,35 +99,19 @@ if not st.session_state['token']:
                     st.session_state['token'] = res['data']['signIn']['jwtToken']['token']
                     st.rerun()
 else:
-    st.sidebar.button("🔄 Forcer Refresh", on_click=lambda: st.rerun())
-    
-    with st.status("Interrogation de l'API Sorare...") as status:
-        data, error_msg = run_audit_query(st.session_state['token'])
-        if error_msg:
-            status.update(label="Échec de l'audit", state="error")
-            st.error(error_msg)
-        else:
-            status.update(label="Audit réussi", state="complete")
+    if st.button("🔄 Actualiser le flux"):
+        st.rerun()
 
-    if data:
-        st.success(f"Capture de {len(data)} offres en cours")
+    data, error_msg = run_audit_query(st.session_state['token'])
+    
+    if error_msg:
+        st.error(error_msg)
+    elif data:
+        st.success(f"{len(data)} dernières offres détectées")
         df = pd.DataFrame(data)
         st.dataframe(df, use_container_width=True)
-    
-    # ZONE DE DEBUG CRITIQUE
-    st.divider()
-    st.subheader("🛠️ Console de diagnostic (JSON Brut)")
-    if 'full_api_response' in st.session_state:
-        st.write("Dernière réponse reçue du serveur :")
-        st.json(st.session_state['full_api_response'])
     else:
-        st.info("Aucune réponse JSON stockée pour le moment.")
+        st.warning("Aucune offre trouvée à cet instant.")
 
-    # Tentative d'explication si vide
-    if not data and not error_msg:
-        st.warning("""
-        ### Pourquoi c'est vide ?
-        L'API Sorare semble restreindre l'accès à `liveSingleSaleOffers` sans paramètres plus précis (comme un sport ou un dictionnaire de slugs). 
-        
-        **Regarde bien le JSON en bas :** - Si tu vois `data: { tokens: { liveSingleSaleOffers: { nodes: [] } } }`, c'est que Sorare bloque le flux "anonyme" global.
-        """)
+    if st.checkbox("⚙️ Voir JSON Brut"):
+        st.json(st.session_state.get('full_api_response'))
