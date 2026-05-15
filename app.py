@@ -35,11 +35,11 @@ def get_market_data(slug, jwt_token):
         "Content-Type": "application/json"
     }
     
-    # Structure CardSetRoot -> cards -> nodes
+    # PASSAGE À anyCards (le standard multi-sport de 2026)
     query = """
     query GetFloor($slug: String!) {
       cardSet(playerSlugs: [$slug], rarities: [limited, rare]) {
-        cards {
+        anyCards {
           nodes {
             rarity
             liveSingleSaleOffer {
@@ -56,12 +56,10 @@ def get_market_data(slug, jwt_token):
         
         if "errors" in res: return None, None
 
-        # On descend d'un étage supplémentaire : cardSet -> cards -> nodes
         card_set = res.get('data', {}).get('cardSet', {})
-        nodes = card_set.get('cards', {}).get('nodes', [])
+        nodes = card_set.get('anyCards', {}).get('nodes', [])
         
         lim_prices, rare_prices = [], []
-        
         for n in nodes:
             offer = n.get('liveSingleSaleOffer')
             if offer and offer.get('receiverSide', {}).get('wei'):
@@ -107,7 +105,7 @@ if not st.session_state['final_token']:
                     st.session_state['final_token'] = res['data']['signIn']['jwtToken']['token']
                     st.rerun()
 else:
-    st.success("✅ Connexion établie")
+    st.success("✅ Connexion validée")
     watchlist = {"Hervé Koffi": "kouakou-herve-koffi", "Jordan Lefort": "jordan-lefort"}
 
     for name, slug in watchlist.items():
@@ -121,7 +119,7 @@ else:
             col3.write(f"R: {p_rare:.4f} Ξ")
             if ratio < 4.0: col4.success(f"🔥 Ratio: {ratio:.2f}")
             else: col4.info(f"⚖️ Ratio: {ratio:.2f}")
-        else: col4.warning("Recherche d'offres en cours...")
+        else: col4.warning("En attente de données marché...")
         st.divider()
 
     if st.checkbox("Debug JSON"):
