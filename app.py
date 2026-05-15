@@ -24,14 +24,14 @@ def sorare_sign_in(email, hashed_password=None, otp_attempt=None, otp_session_ch
     input_data = {"otpSessionChallenge": otp_session_challenge, "otpAttempt": otp_attempt} if otp_session_challenge else {"email": email, "password": hashed_password}
     return requests.post(API_URL, json={'query': query, 'variables': {"input": input_data}}).json()
 
-def get_latest_market_flux(jwt_token):
+def get_latest_market_flux_optimized(jwt_token):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE, "Content-Type": "application/json"}
     
-    # On demande les 50 dernières offres (flux global) pour être sûr d'avoir des Rares dedans
-    query = """
+    # 1. On récupère les 200 dernières offres (Flux massif)
+    query_flux = """
     query GetMarketFlux {
       tokens {
-        liveSingleSaleOffers(first: 50) {
+        liveSingleSaleOffers(first: 200) {
           nodes {
             senderSide {
               anyCards {
@@ -46,7 +46,7 @@ def get_latest_market_flux(jwt_token):
     }
     """
     try:
-        res = requests.post(API_URL, json={'query': query}, headers=headers).json()
+        res = requests.post(API_URL, json={'query': query_flux}, headers=headers).json()
         all_offers = res.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
         
         rare_findings = []
@@ -55,42 +55,39 @@ def get_latest_market_flux(jwt_token):
             if not cards: continue
             
             card = cards[0]
-            # On ne garde que les RARES
             if card.get('rarityTyped') == 'rare':
-                player_name = card.get('player', {}).get('displayName')
-                player_slug = card.get('player', {}).get('slug')
-                rare_price = float(offer.get('receiverSide', {}).get('amounts', {}).get('eurCents', 0)) / 100
-                
-                # Récupération flash du floor Limited pour ce joueur
-                q_lim = """
-                query GetLim($s: String!) {
-                  tokens {
-                    liveSingleSaleOffers(playerSlug: $s, rarities: [limited], first: 1) {
-                      nodes { receiverSide { amounts { eurCents } } }
-                    }
-                  }
-                }
-                """
-                res_lim = requests.post(API_URL, json={'query': q_lim, 'variables': {'s': player_slug}}, headers=headers).json()
-                lim_nodes = res_lim.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
-                
-                min_lim = None
-                if lim_nodes:
-                    min_lim = float(lim_nodes[0]['receiverSide']['amounts']['eurCents']) / 100
-
                 rare_findings.append({
-                    "name": player_name,
-                    "rare_price": rare_price,
-                    "lim_price": min_lim
+                    "name": card.get('player', {}).get('displayName'),
+                    "slug": card.get('player', {}).get('slug'),
+                    "rare_price": float(offer.get('receiverSide', {}).get('amounts', {}).get('eurCents', 0)) / 100
                 })
-                if len(rare_findings) >= 10: break # On s'arrête à 10
+        
+        if not rare_findings: return []
+
+        # 2. On récupère TOUS les floors Limited en UNE SEULE REQUÊTE (Aliasing)
+        # On limite aux 15 premières Rares trouvées pour ne pas faire exploser la requête
+        rare_findings = rare_findings[:15] 
+        alias_query = "query GetFloors { "
+        for i, item in enumerate(rare_findings):
+            alias_query += f'f{i}: tokens {{ liveSingleSaleOffers(playerSlug: "{item["slug"]}", rarities: [limited], first: 1) {{ nodes {{ receiverSide {{ amounts {{ eurCents }} }} }} }} }} '
+        alias_query += " }"
+        
+        res_floors = requests.post(API_URL, json={'query': alias_query}, headers=headers).json()
+        floors_data = res_floors.get('data', {})
+
+        for i, item in enumerate(rare_findings):
+            nodes = floors_data.get(f'f{i}', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
+            if nodes:
+                item['lim_price'] = float(nodes[0]['receiverSide']['amounts']['eurCents']) / 100
+            else:
+                item['lim_price'] = None
                 
         return rare_findings
     except: return []
 
-# --- UI ---
-st.set_page_config(page_title="Scanner Live", page_icon="⚡")
-st.title("⚡ Flux Live : Dernières Rares vs Floor Limited")
+# --- UI STREAMLIT ---
+st.set_page_config(page_title="Scanner 200", page_icon="⚡", layout="wide")
+st.title("⚡ Scanner Haute Intensité (Top 200)")
 
 if 'token' not in st.session_state: st.session_state['token'] = None
 
@@ -98,7 +95,7 @@ if not st.session_state['token']:
     with st.form("login"):
         e = st.text_input("Email", value="jacques.troispoils@gmail.com")
         p = st.text_input("Pass", type="password")
-        if st.form_submit_button("Lancer le Scanner"):
+        if st.form_submit_button("Lancer le Scanner 200"):
             salt = get_user_salt(e)
             if salt:
                 hp = bcrypt.hashpw(p.encode(), salt.encode()).decode()
@@ -107,14 +104,16 @@ if not st.session_state['token']:
                     st.session_state['token'] = res['data']['signIn']['jwtToken']['token']
                     st.rerun()
 else:
-    if st.button("🔄 Actualiser le flux"): st.rerun()
+    if st.button("🔄 Scanner les 200 derniers mouvements"): st.rerun()
 
-    with st.spinner("Analyse du flux de marché en cours..."):
-        data = get_latest_market_flux(st.session_state['token'])
+    with st.spinner("Analyse profonde du marché (200 derniers items)..."):
+        data = get_latest_market_flux_optimized(st.session_state['token'])
     
     if not data:
-        st.warning("Aucune offre Rare détectée dans les 50 derniers mouvements de marché. Réessaie dans quelques secondes.")
-    
+        st.warning("Aucune Rare trouvée dans les 200 derniers mouvements.")
+    else:
+        st.success(f"Analyse terminée : {len(data)} cartes Rares trouvées.")
+
     for item in data:
         c1, c2, c3, c4 = st.columns([2, 1, 1, 2])
         c1.markdown(f"**{item['name']}**")
