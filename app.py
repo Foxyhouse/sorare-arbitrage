@@ -9,11 +9,15 @@ AUDIENCE = "sorare-app"
 
 def get_limited_floor(player_slug, jwt_token):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE}
+    # Ici, playerSlug est accepté, donc on peut filtrer la rareté pour le floor
     query = """
     query GetLim($slug: String!) {
       tokens {
-        liveSingleSaleOffers(playerSlug: $slug, rarities: [limited], first: 1) {
-          nodes { receiverSide { amounts { eurCents } } }
+        liveSingleSaleOffers(playerSlug: $slug, first: 10) {
+          nodes {
+            senderSide { anyCards { rarityTyped } }
+            receiverSide { amounts { eurCents } }
+          }
         }
       }
     }
@@ -21,19 +25,23 @@ def get_limited_floor(player_slug, jwt_token):
     try:
         res = requests.post(API_URL, json={'query': query, 'variables': {'slug': player_slug}}, headers=headers).json()
         nodes = res.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
-        if nodes:
-            return float(nodes[0]['receiverSide']['amounts']['eurCents']) / 100
-    except: pass
-    return None
+        lim_prices = []
+        for n in nodes:
+            card = n.get('senderSide', {}).get('anyCards', [{}])[0]
+            if card.get('rarityTyped') == 'limited':
+                price = n.get('receiverSide', {}).get('amounts', {}).get('eurCents')
+                if price: lim_prices.append(float(price) / 100)
+        return min(lim_prices) if lim_prices else None
+    except: return None
 
-def scan_audit_100(jwt_token):
+def scan_arbitrage_final(jwt_token):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE, "Content-Type": "application/json"}
     
-    # ÉTAPE 1 : ON FORCE LE FILTRE SUR LES RARES UNIQUEMENT
+    # REQUÊTE SANS ARGUMENT 'rarities' (Validé par l'erreur JSON)
     query = """
-    query Get100Rares {
+    query GetFlux {
       tokens {
-        liveSingleSaleOffers(first: 100, rarities: [rare], sport: FOOTBALL) {
+        liveSingleSaleOffers(first: 100, sport: FOOTBALL) {
           nodes {
             senderSide {
               anyCards {
@@ -52,59 +60,60 @@ def scan_audit_100(jwt_token):
     try:
         response = requests.post(API_URL, json={'query': query}, headers=headers)
         res_json = response.json()
-        st.session_state['audit_raw'] = res_json # Debug
+        st.session_state['audit_raw'] = res_json
         
-        if "errors" in res_json:
-            st.error(f"Erreur API : {res_json['errors'][0]['message']}")
-            return []
-
         nodes = res_json.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
         
         findings = []
         for n in nodes:
             cards = n.get('senderSide', {}).get('anyCards', [])
-            if cards:
-                c = cards[0]
+            if not cards: continue
+            
+            c = cards[0]
+            # Tri manuel en Python
+            if c.get('rarityTyped') == 'rare':
                 findings.append({
                     "Date": n.get('startDate'),
-                    "name": c.get('anyPlayer', {}).get('displayName'),
-                    "slug": c.get('anyPlayer', {}).get('slug'),
-                    "rarity_check": c.get('rarityTyped'), # Pour vérifier la casse
-                    "rare_price": float(n.get('receiverSide', {}).get('amounts', {}).get('eurCents', 0)) / 100
+                    "Joueur": c.get('anyPlayer', {}).get('displayName'),
+                    "Slug": c.get('anyPlayer', {}).get('slug'),
+                    "Prix Rare (€)": float(n.get('receiverSide', {}).get('amounts', {}).get('eurCents', 0)) / 100
                 })
         
-        # ÉTAPE 2 : CALCUL DES RATIOS
-        for item in findings[:15]: # On limite le calcul intensif aux 15 premières
-            item['lim_price'] = get_limited_floor(item['slug'], jwt_token)
-            if item['lim_price']:
-                item['Ratio'] = round(item['rare_price'] / item['lim_price'], 2)
+        # Calcul des ratios pour les Rares trouvées
+        for item in findings[:15]: 
+            item['Floor Limited (€)'] = get_limited_floor(item['Slug'], jwt_token)
+            if item['Floor Limited (€)']:
+                item['Ratio'] = round(item['Prix Rare (€)'] / item['Floor Limited (€)'], 2)
             else:
                 item['Ratio'] = "N/A"
                 
         return findings
     except Exception as e:
-        st.error(f"Crash : {e}")
+        st.error(f"Erreur : {e}")
         return []
 
 # --- UI ---
-st.set_page_config(page_title="Audit Arbitrage 100", layout="wide")
-st.title("🔎 Audit Tactique : Flux 100 Rares")
+st.set_page_config(page_title="Arbitrage Scanner 2026", layout="wide")
+st.title("🚀 Scanner d'Arbitrage (Flux 100)")
 
 if 'token' not in st.session_state:
-    st.warning("Connecte-toi d'abord.")
+    st.info("Connecte-toi via l'onglet précédent.")
 else:
-    if st.button("🚀 Lancer l'Audit des 100 Rares"):
-        with st.spinner("Interrogation du marché live..."):
-            data = scan_audit_100(st.session_state['token'])
+    if st.button("🔄 Scanner le Marché"):
+        with st.spinner("Analyse du flux live..."):
+            data = scan_arbitrage_final(st.session_state['token'])
             if data:
-                st.success(f"Trouvé {len(data)} offres Rares récentes.")
-                st.dataframe(pd.DataFrame(data), use_container_width=True)
+                df = pd.DataFrame(data).drop(columns=['Slug'])
+                st.success(f"Trouvé {len(data)} cartes Rares dans le flux.")
+                
+                def highlight_ratio(s):
+                    if isinstance(s, float) and s < 4.0:
+                        return 'background-color: #d4edda; color: #155724; font-weight: bold'
+                    return ''
+                
+                st.dataframe(df.style.applymap(highlight_ratio, subset=['Ratio']), use_container_width=True)
             else:
-                st.error("La liste est vide. Regarde le JSON Brut ci-dessous.")
+                st.warning("Aucune Rare détectée dans les 100 dernières offres. Réessaie dans 10 secondes.")
 
-    st.divider()
-    if st.checkbox("⚙️ VOIR LE JSON BRUT (LA SOURCE DE VÉRITÉ)"):
-        if 'audit_raw' in st.session_state:
-            st.json(st.session_state['audit_raw'])
-        else:
-            st.info("Aucune donnée à afficher. Lance un audit.")
+    if st.checkbox("⚙️ Debug JSON"):
+        st.json(st.session_state.get('audit_raw', {}))
