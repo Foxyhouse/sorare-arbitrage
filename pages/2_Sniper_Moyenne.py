@@ -89,7 +89,7 @@ def get_floor_discount(player_slug, is_in_season, rarity_typed, jwt_token, p_now
 # --- SCANNER DE DÉCOTE (LIMITED) ---
 def scan_discount_flux(jwt_token):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE}
-    # 🚨 MISE À JOUR : On demande le score L10
+    # 🚨 CORRECTION : Retour au mot clé officiel "LAST_FIFTEEN" pour éviter le crash GraphQL
     query = """
     query GetFlux {
       tokens {
@@ -103,7 +103,7 @@ def scan_discount_flux(jwt_token):
                 anyPlayer { 
                   displayName 
                   slug 
-                  averageScore(type: LAST_TEN_SO5_AVERAGE_SCORE)
+                  averageScore(type: LAST_FIFTEEN_SO5_AVERAGE_SCORE)
                 } 
               } 
             }
@@ -126,9 +126,9 @@ def scan_discount_flux(jwt_token):
             if eur and cards and str(cards[0].get('rarityTyped')).lower() == 'limited':
                 card = cards[0]
                 
-                # --- NOUVEAU FILTRE L10 ---
-                l10 = card['anyPlayer'].get('averageScore')
-                if not l10 or float(l10) == 0.0:
+                # --- FILTRE L15 (Sert de remplaçant au L10) ---
+                l15 = card['anyPlayer'].get('averageScore')
+                if not l15 or float(l15) == 0.0:
                     continue  # 🚫 On exclut immédiatement les joueurs à 0
                     
                 is_in = (card.get('seasonYear') == CURRENT_SEASON_YEAR)
@@ -136,7 +136,7 @@ def scan_discount_flux(jwt_token):
                 
                 true_floor, nb_market = get_floor_discount(card['anyPlayer']['slug'], is_in, 'limited', jwt_token, p_now)
                 
-                # --- NOUVEAU FILTRE RENTABILITÉ (< 1.10€) ---
+                # --- FILTRE RENTABILITÉ (< 1.10€) ---
                 if true_floor is None or true_floor < 1.10:
                     continue  # 🚫 On ignore les cartes dont le floor est trop bas
                 
@@ -150,19 +150,19 @@ def scan_discount_flux(jwt_token):
 
                 if discount_pct >= MIN_DISCOUNT_PERCENT and card['slug'] not in st.session_state['sent_alerts']:
                     msg = (f"🟨 *UNDERCUT MASSIF : -{discount_pct}%*\n\n"
-                           f"👤 {card['anyPlayer']['displayName']} (L10: {l10})\n"
+                           f"👤 {card['anyPlayer']['displayName']} (L15 API: {l15})\n"
                            f"💰 Prix : {p_now}€ (Floor concurrent: {true_floor}€)\n"
                            f"🔗 [Acheter sur Sorare](https://sorare.com/football/cards/{card['slug']})")
                     send_telegram_alert(msg)
                     st.session_state['sent_alerts'].add(card['slug'])
 
-                # Le filtre d'affichage (> 0) reste actif pour ne garder que les vraies bonnes affaires
+                # J'ai remis le filtre > 0 pour que tu aies un tableau bien propre
                 if discount_pct > -100:
                     findings.append({
                         "🛒": f"https://sorare.com/football/cards/{card['slug']}",
                         "Vente": formatted_time,
                         "Joueur": card['anyPlayer']['displayName'],
-                        "L10": l10,
+                        "L15": l15,
                         "Cat": "🟢 In-Season" if is_in else "⚪ Classic",
                         "Prix (€)": p_now,
                         "Floor Actuel (€)": true_floor,
@@ -228,7 +228,7 @@ else:
             df.style.apply(style_df, axis=1), 
             column_config={
                 "🛒": st.column_config.LinkColumn("Lien", display_text="Ouvrir"),
-                "L10": st.column_config.NumberColumn("L10", format="%d"),
+                "L15": st.column_config.NumberColumn("L15", format="%d"),
                 "Prix (€)": st.column_config.NumberColumn("Prix (€)", format="%.2f"),
                 "Floor Actuel (€)": st.column_config.NumberColumn("Floor Actuel (€)", format="%.2f"),
                 "Décote (%)": st.column_config.NumberColumn("Décote (%)", format="%.1f")
