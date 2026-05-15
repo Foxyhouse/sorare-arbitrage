@@ -76,7 +76,7 @@ def scan_arbitrage_sniper(jwt_token):
                 # --- FILTRE DE PERTINENCE ---
                 # On ne garde que si c'est un undercut OU un bon ratio
                 is_undercut = f_rare and price_now <= f_rare
-                is_good_ratio = ratio and ratio < 6.5
+                is_good_ratio = ratio and ratio < 60.5
                 
                 if is_undercut or is_good_ratio:
                     findings.append({
