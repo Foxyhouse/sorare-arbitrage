@@ -35,10 +35,10 @@ def get_market_data(slug, jwt_token):
         "Content-Type": "application/json"
     }
     
-    # Requête sur UN SEUL joueur (slug: String!) pour respecter la contrainte de l'API
+    # On utilise 'players' (pluriel) mais on ne passe qu'un seul slug
     query = """
-    query GetFloor($slug: String!) {
-      player(slug: $slug) {
+    query GetFloor($slugs: [String!]) {
+      players(slugs: $slugs) {
         anyCards(rarities: [limited, rare]) {
           nodes {
             rarityTyped
@@ -53,15 +53,17 @@ def get_market_data(slug, jwt_token):
     }
     """
     try:
-        res = requests.post(API_URL, json={'query': query, 'variables': {'slug': slug}}, headers=headers).json()
+        # On envoie le slug dans une liste : [slug]
+        res = requests.post(API_URL, json={'query': query, 'variables': {'slugs': [slug]}}, headers=headers).json()
         st.session_state['last_debug'] = res 
         
         if "errors" in res: return None, None
 
-        player_node = res.get('data', {}).get('player')
-        if not player_node: return None, None
+        # On récupère le premier élément de la liste 'players'
+        players_list = res.get('data', {}).get('players', [])
+        if not players_list or not players_list[0]: return None, None
         
-        cards = player_node.get('anyCards', {}).get('nodes', [])
+        cards = players_list[0].get('anyCards', {}).get('nodes', [])
         lim_prices, rare_prices = [], []
         
         for c in cards:
