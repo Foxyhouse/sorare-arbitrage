@@ -38,11 +38,11 @@ def get_market_data(slug, jwt_token):
     query = """
     query GetFloor($slugs: [String!]) {
       players(slugs: $slugs) {
-        ... on Player {
-          tokenPrices {
-            nodes {
-              rarity
-              amount {
+        anyCards(rarities: [limited, rare]) {
+          nodes {
+            rarity
+            liveSingleSaleOffer {
+              receiverSide {
                 wei
               }
             }
@@ -60,19 +60,22 @@ def get_market_data(slug, jwt_token):
         players = res.get('data', {}).get('players', [])
         if not players or not players[0]: return None, None
         
-        token_prices = players[0].get('tokenPrices', {}).get('nodes', [])
+        cards = players[0].get('anyCards', {}).get('nodes', [])
         lim_prices, rare_prices = [], []
         
-        for tp in token_prices:
-            if not tp: continue
+        for c in cards:
+            if not c: continue
             
-            rarity = tp.get('rarity')
-            amount = tp.get('amount', {})
-            
-            if amount and amount.get('wei'):
-                val = float(amount['wei']) / 1e18
-                if rarity and str(rarity).lower() == 'limited': lim_prices.append(val)
-                elif rarity and str(rarity).lower() == 'rare': rare_prices.append(val)
+            offer = c.get('liveSingleSaleOffer')
+            if offer:
+                receiver = offer.get('receiverSide', {})
+                if receiver and receiver.get('wei'):
+                    val = float(receiver['wei']) / 1e18
+                    rarity = c.get('rarity')
+                    if rarity:
+                        rarity_str = str(rarity).lower()
+                        if rarity_str == 'limited': lim_prices.append(val)
+                        elif rarity_str == 'rare': rare_prices.append(val)
         
         return (min(lim_prices) if lim_prices else None, min(rare_prices) if rare_prices else None)
     except: return None, None
