@@ -42,9 +42,7 @@ def get_market_data(slug, jwt_token):
           rarity
           liveSingleSaleOffer {
             receiverSide {
-              amounts {
-                amount
-              }
+              wei
             }
           }
         }
@@ -65,20 +63,12 @@ def get_market_data(slug, jwt_token):
             
             offer = c.get('liveSingleSaleOffer')
             if offer:
-                amounts = offer.get('receiverSide', {}).get('amounts')
-                if amounts:
-                    if isinstance(amounts, list) and len(amounts) > 0:
-                        val_str = amounts[0].get('amount')
-                    elif isinstance(amounts, dict):
-                        val_str = amounts.get('amount')
-                    else:
-                        val_str = None
-                        
-                    if val_str is not None:
-                        val = float(val_str)
-                        rarity = c.get('rarity')
-                        if rarity == 'limited': lim_prices.append(val)
-                        elif rarity == 'rare': rare_prices.append(val)
+                receiver = offer.get('receiverSide', {})
+                if receiver and receiver.get('wei'):
+                    val = float(receiver['wei']) / 1e18
+                    rarity = c.get('rarity')
+                    if rarity == 'limited': lim_prices.append(val)
+                    elif rarity == 'rare': rare_prices.append(val)
         
         return (min(lim_prices) if lim_prices else None, min(rare_prices) if rare_prices else None)
     except: return None, None
@@ -139,8 +129,8 @@ else:
         
         if p_lim is not None and p_rare is not None:
             ratio = p_rare / p_lim if p_lim > 0 else 0
-            col2.write(f"L: {p_lim}")
-            col3.write(f"R: {p_rare}")
+            col2.write(f"L: {p_lim:.4f} Ξ")
+            col3.write(f"R: {p_rare:.4f} Ξ")
             if ratio > 0 and ratio < 4.0: col4.success(f"🔥 Ratio: {ratio:.2f} (BUY !)")
             else: col4.info(f"⚖️ Ratio: {ratio:.2f}")
         else: col4.warning("Aucun prix trouvé sur le marché.")
