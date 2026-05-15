@@ -19,7 +19,7 @@ except Exception as e:
 API_URL = "https://api.sorare.com/graphql"
 AUDIENCE = "sorare-app"
 CURRENT_SEASON_YEAR = 2026 
-MIN_DISCOUNT_PERCENT = 20 # 🎯 Le filtre pour l'alerte Telegram
+MIN_DISCOUNT_PERCENT = 20 
 
 # --- ÉTAT DE LA SESSION ---
 if 'token' not in st.session_state: st.session_state['token'] = None
@@ -45,7 +45,6 @@ def sorare_sign_in(email, hashed_password=None, otp_attempt=None, otp_challenge=
     try: return requests.post(API_URL, json={'query': query, 'variables': variables}, timeout=10).json().get('data', {}).get('signIn', {})
     except: return {}
 
-# --- FONCTION : VRAI FLOOR ACTUEL DU MARCHÉ ---
 def get_floor_discount(player_slug, is_in_season, rarity_typed, jwt_token, p_now):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE}
     query = """
@@ -63,37 +62,32 @@ def get_floor_discount(player_slug, is_in_season, rarity_typed, jwt_token, p_now
     try:
         res = requests.post(API_URL, json={'query': query, 'variables': {'slug': player_slug}}, headers=headers, timeout=10).json()
         nodes = res.get('data', {}).get('tokens', {}).get('all_offers', {}).get('nodes', [])
-        
         valid_prices = []
         for n in nodes:
             cards = n.get('senderSide', {}).get('anyCards')
             if not cards: continue
             card = cards[0]
             card_is_in = (card.get('seasonYear') == CURRENT_SEASON_YEAR)
-            
             if str(card.get('rarityTyped')).lower() == rarity_typed.lower() and card_is_in == is_in_season:
                 eur = n.get('receiverSide', {}).get('amounts', {}).get('eurCents')
                 if eur:
                     valid_prices.append(round(float(eur) / 100, 2))
-        
         valid_prices.sort()
-        
         if p_now in valid_prices:
             valid_prices.remove(p_now)
-            
         if len(valid_prices) > 0:
             return valid_prices[0], len(valid_prices)
         return None, 0
     except: return None, 0
 
-# --- SCANNER DE DÉCOTE (LIMITED) ---
+# --- SCANNER DE DÉCOTE (FLUX DES NOUVEAUTÉS) ---
 def scan_discount_flux(jwt_token):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE}
-    # 🚨 CORRECTION : Retour au mot clé officiel "LAST_FIFTEEN" pour éviter le crash GraphQL
+    # 🚨 MISE À JOUR : On trie par date de début descendante pour avoir les NOUVELLES cartes
     query = """
-    query GetFlux {
+    query GetRecentFlux {
       tokens {
-        liveSingleSaleOffers(first: 100, sport: FOOTBALL) {
+        liveSingleSaleOffers(first: 100, sport: FOOTBALL, sort: NEWEST) {
           nodes {
             senderSide { 
               anyCards { 
@@ -125,42 +119,49 @@ def scan_discount_flux(jwt_token):
             
             if eur and cards and str(cards[0].get('rarityTyped')).lower() == 'limited':
                 card = cards[0]
-                
-                # --- FILTRE L15 (Sert de remplaçant au L10) ---
                 l15 = card['anyPlayer'].get('averageScore')
+                
+                # Filtre L15 > 0
                 if not l15 or float(l15) == 0.0:
-                    continue  # 🚫 On exclut immédiatement les joueurs à 0
+                    continue
                     
                 is_in = (card.get('seasonYear') == CURRENT_SEASON_YEAR)
                 p_now = round(float(eur) / 100, 2)
                 
                 true_floor, nb_market = get_floor_discount(card['anyPlayer']['slug'], is_in, 'limited', jwt_token, p_now)
                 
-                # --- FILTRE RENTABILITÉ (< 1.10€) ---
+                # Filtre rentabilité Floor > 1.10€
                 if true_floor is None or true_floor < 1.10:
-                    continue  # 🚫 On ignore les cartes dont le floor est trop bas
+                    continue
                 
                 discount_pct = round(((true_floor - p_now) / true_floor) * 100, 1)
                 
+                # Heure Locale
                 raw_date = n.get('startDate', "")
                 try:
+                    # Format Sorare : 2026-05-15T15:39:51Z
                     utc_dt = datetime.strptime(raw_date, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=tz.tzutc())
-                    formatted_time = utc_dt.astimezone(tz.tzlocal()).strftime("%H:%M:%S")
-                except: formatted_time = raw_date
+                    local_dt = utc_dt.astimezone(tz.tzlocal())
+                    formatted_time = local_dt.strftime("%H:%M:%S")
+                    timestamp = local_dt.timestamp()
+                except: 
+                    formatted_time = raw_date
+                    timestamp = 0
 
+                # Alerte Telegram
                 if discount_pct >= MIN_DISCOUNT_PERCENT and card['slug'] not in st.session_state['sent_alerts']:
-                    msg = (f"🟨 *UNDERCUT MASSIF : -{discount_pct}%*\n\n"
-                           f"👤 {card['anyPlayer']['displayName']} (L15 API: {l15})\n"
-                           f"💰 Prix : {p_now}€ (Floor concurrent: {true_floor}€)\n"
-                           f"🔗 [Acheter sur Sorare](https://sorare.com/football/cards/{card['slug']})")
+                    msg = (f"🟨 *NOUVEAU SNIPE : -{discount_pct}%*\n\n"
+                           f"👤 {card['anyPlayer']['displayName']} (L15: {l15})\n"
+                           f"💰 Prix : {p_now}€ (Floor: {true_floor}€)\n"
+                           f"🔗 [Acheter](https://sorare.com/football/cards/{card['slug']})")
                     send_telegram_alert(msg)
                     st.session_state['sent_alerts'].add(card['slug'])
 
-                # J'ai remis le filtre > 0 pour que tu aies un tableau bien propre
-                if discount_pct > -100:
+                if discount_pct > 0:
                     findings.append({
                         "🛒": f"https://sorare.com/football/cards/{card['slug']}",
                         "Vente": formatted_time,
+                        "_ts": timestamp,
                         "Joueur": card['anyPlayer']['displayName'],
                         "L15": l15,
                         "Cat": "🟢 In-Season" if is_in else "⚪ Classic",
@@ -170,16 +171,17 @@ def scan_discount_flux(jwt_token):
                         "Décote (%)": discount_pct
                     })
                     
-        return sorted(findings, key=lambda x: x['Vente'], reverse=True)
+        # On trie pour que la plus RECENTE soit en haut (Timestamp le plus grand)
+        return sorted(findings, key=lambda x: x['_ts'], reverse=True)
     except: return []
 
-# --- INTERFACE STRICTE ---
-st.set_page_config(page_title="Sniper Décote (Limited)", layout="wide")
+# --- INTERFACE ---
+st.set_page_config(page_title="Sniper Nouveautés", layout="wide")
 
 if st.session_state['token'] is None:
     st.title("🔐 Connexion Sorare")
     if not st.session_state['otp_needed']:
-        if st.button("🚀 Se connecter via Secrets"):
+        if st.button("🚀 Initialiser via Secrets"):
             res = requests.get(f"https://api.sorare.com/api/v1/users/{DEFAULT_EMAIL}").json()
             salt = res.get("salt")
             if salt:
@@ -191,37 +193,31 @@ if st.session_state['token'] is None:
                 elif res_sign.get('jwtToken'):
                     st.session_state['token'] = res_sign['jwtToken']['token']
                     st.rerun()
-            else: st.error("Email inconnu.")
     else:
-        otp_code = st.text_input("Code 2FA :", key="otp_input")
+        otp_code = st.text_input("Code 2FA :")
         if st.button("Valider OTP"):
             res_sign = sorare_sign_in(None, otp_attempt=otp_code, otp_challenge=st.session_state['otp_needed'])
             if res_sign.get('jwtToken'):
                 st.session_state['token'] = res_sign['jwtToken']['token']
                 st.session_state['otp_needed'] = None
                 st.rerun()
-            else: st.error("OTP Invalide.")
-
 else:
-    st.sidebar.success(f"Scanner Limited Actif\n(Cible Telegram: -{MIN_DISCOUNT_PERCENT}%)")
-    st.sidebar.write(f"🕒 Dernière màj : {datetime.now().strftime('%H:%M:%S')}")
+    st.sidebar.success(f"Radar Nouveautés Actif")
+    st.sidebar.write(f"🕒 {datetime.now().strftime('%H:%M:%S')}")
     if st.sidebar.button("Déconnexion"):
         st.session_state.clear()
         st.rerun()
 
     data = scan_discount_flux(st.session_state['token'])
     if data:
-        df = pd.DataFrame(data)
+        df = pd.DataFrame(data).drop(columns=['_ts']) # On cache le timestamp technique
         
         def style_df(row):
             styles = [''] * len(row)
             decote = row['Décote (%)']
-            if decote >= 30:
-                styles[8] = 'background-color: #28a745; color: white; font-weight: bold'
-            elif decote >= 20:
-                styles[8] = 'background-color: #d4edda; color: #155724; font-weight: bold'
-            elif decote >= 10:
-                styles[8] = 'background-color: #fff3cd; color: #856404; font-weight: bold'
+            if decote >= 30: styles[8] = 'background-color: #28a745; color: white; font-weight: bold'
+            elif decote >= 20: styles[8] = 'background-color: #d4edda; color: #155724; font-weight: bold'
+            elif decote >= 10: styles[8] = 'background-color: #fff3cd; color: #856404; font-weight: bold'
             return styles
 
         st.dataframe(
@@ -233,11 +229,10 @@ else:
                 "Floor Actuel (€)": st.column_config.NumberColumn("Floor Actuel (€)", format="%.2f"),
                 "Décote (%)": st.column_config.NumberColumn("Décote (%)", format="%.1f")
             }, 
-            use_container_width=True, 
-            hide_index=True
+            use_container_width=True, hide_index=True
         )
     else:
-        st.info("Recherche de cartes sous-évaluées en cours...")
+        st.info("Attente de nouvelles mises en vente...")
     
     time.sleep(60)
     st.rerun()
