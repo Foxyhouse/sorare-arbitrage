@@ -35,12 +35,13 @@ def get_market_data(slug, jwt_token):
         "Content-Type": "application/json"
     }
     
+    # Remplacement de 'rarity' par 'rarityTyped' comme suggéré par l'API
     query = """
     query GetFloor($slugs: [String!]) {
       players(slugs: $slugs) {
         anyCards(rarities: [limited, rare]) {
           nodes {
-            rarity
+            rarityTyped
             liveSingleSaleOffer {
               receiverSide {
                 wei
@@ -71,7 +72,7 @@ def get_market_data(slug, jwt_token):
                 receiver = offer.get('receiverSide', {})
                 if receiver and receiver.get('wei'):
                     val = float(receiver['wei']) / 1e18
-                    rarity = c.get('rarity')
+                    rarity = c.get('rarityTyped')
                     if rarity:
                         rarity_str = str(rarity).lower()
                         if rarity_str == 'limited': lim_prices.append(val)
