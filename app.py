@@ -41,7 +41,7 @@ def get_market_data(slug, jwt_token):
         ... on Player {
           tokenPrices {
             nodes {
-              scarcity
+              rarity
               amount {
                 wei
               }
@@ -66,13 +66,13 @@ def get_market_data(slug, jwt_token):
         for tp in token_prices:
             if not tp: continue
             
-            scarcity = tp.get('scarcity')
+            rarity = tp.get('rarity')
             amount = tp.get('amount', {})
             
             if amount and amount.get('wei'):
                 val = float(amount['wei']) / 1e18
-                if scarcity and str(scarcity).lower() == 'limited': lim_prices.append(val)
-                elif scarcity and str(scarcity).lower() == 'rare': rare_prices.append(val)
+                if rarity and str(rarity).lower() == 'limited': lim_prices.append(val)
+                elif rarity and str(rarity).lower() == 'rare': rare_prices.append(val)
         
         return (min(lim_prices) if lim_prices else None, min(rare_prices) if rare_prices else None)
     except: return None, None
