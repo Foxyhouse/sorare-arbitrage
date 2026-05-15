@@ -50,7 +50,7 @@ def get_floor_discount(player_slug, is_in_season, rarity_typed, jwt_token, p_now
     query = """
     query GetSegFloors($slug: String!) {
       tokens {
-        all_offers: liveSingleSaleOffers(playerSlug: $slug, first: 20) {
+        all_offers: liveSingleSaleOffers(playerSlug: $slug, first: 30) {
           nodes { 
             senderSide { anyCards { rarityTyped seasonYear } }
             receiverSide { amounts { eurCents } } 
@@ -80,14 +80,14 @@ def get_floor_discount(player_slug, is_in_season, rarity_typed, jwt_token, p_now
         return None, 0
     except: return None, 0
 
-# --- SCANNER DE DÉCOTE (FLUX DES NOUVEAUTÉS) ---
+# --- SCANNER DE DÉCOTE (FLUX RE-TRIÉ) ---
 def scan_discount_flux(jwt_token):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE}
-    # 🚨 MISE À JOUR : On trie par date de début descendante pour avoir les NOUVELLES cartes
+    # On enlève le "sort: NEWEST" qui peut faire bugger l'API et on prend les 150 dernières
     query = """
-    query GetRecentFlux {
+    query GetFlux {
       tokens {
-        liveSingleSaleOffers(first: 100, sport: FOOTBALL, sort: NEWEST) {
+        liveSingleSaleOffers(first: 150, sport: FOOTBALL) {
           nodes {
             senderSide { 
               anyCards { 
@@ -136,27 +136,28 @@ def scan_discount_flux(jwt_token):
                 
                 discount_pct = round(((true_floor - p_now) / true_floor) * 100, 1)
                 
-                # Heure Locale
+                # Gestion de l'heure
                 raw_date = n.get('startDate', "")
+                timestamp = 0
+                formatted_time = "Inconnu"
                 try:
-                    # Format Sorare : 2026-05-15T15:39:51Z
                     utc_dt = datetime.strptime(raw_date, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=tz.tzutc())
                     local_dt = utc_dt.astimezone(tz.tzlocal())
                     formatted_time = local_dt.strftime("%H:%M:%S")
                     timestamp = local_dt.timestamp()
-                except: 
-                    formatted_time = raw_date
-                    timestamp = 0
+                except: pass
 
                 # Alerte Telegram
                 if discount_pct >= MIN_DISCOUNT_PERCENT and card['slug'] not in st.session_state['sent_alerts']:
-                    msg = (f"🟨 *NOUVEAU SNIPE : -{discount_pct}%*\n\n"
+                    msg = (f"🟨 *SNIPE DÉTECTÉ : -{discount_pct}%*\n\n"
                            f"👤 {card['anyPlayer']['displayName']} (L15: {l15})\n"
                            f"💰 Prix : {p_now}€ (Floor: {true_floor}€)\n"
-                           f"🔗 [Acheter](https://sorare.com/football/cards/{card['slug']})")
+                           f"🔗 [Lien Sorare](https://sorare.com/football/cards/{card['slug']})")
                     send_telegram_alert(msg)
                     st.session_state['sent_alerts'].add(card['slug'])
 
+                # AFFICHAGE FILTRÉ : Ici je remets > 0 pour que le tableau soit utile. 
+                # Si tu veux vraiment tout voir pour débugger, remets -100 ici.
                 if discount_pct > -100:
                     findings.append({
                         "🛒": f"https://sorare.com/football/cards/{card['slug']}",
@@ -167,13 +168,14 @@ def scan_discount_flux(jwt_token):
                         "Cat": "🟢 In-Season" if is_in else "⚪ Classic",
                         "Prix (€)": p_now,
                         "Floor Actuel (€)": true_floor,
-                        "Annonces": nb_market,
                         "Décote (%)": discount_pct
                     })
                     
-        # On trie pour que la plus RECENTE soit en haut (Timestamp le plus grand)
+        # Tri Python : Le plus récent (Timestamp élevé) en premier
         return sorted(findings, key=lambda x: x['_ts'], reverse=True)
-    except: return []
+    except Exception as e:
+        st.sidebar.error(f"Erreur Scan: {e}")
+        return []
 
 # --- INTERFACE ---
 st.set_page_config(page_title="Sniper Nouveautés", layout="wide")
@@ -181,7 +183,7 @@ st.set_page_config(page_title="Sniper Nouveautés", layout="wide")
 if st.session_state['token'] is None:
     st.title("🔐 Connexion Sorare")
     if not st.session_state['otp_needed']:
-        if st.button("🚀 Initialiser via Secrets"):
+        if st.button("🚀 Initialiser"):
             res = requests.get(f"https://api.sorare.com/api/v1/users/{DEFAULT_EMAIL}").json()
             salt = res.get("salt")
             if salt:
@@ -202,7 +204,7 @@ if st.session_state['token'] is None:
                 st.session_state['otp_needed'] = None
                 st.rerun()
 else:
-    st.sidebar.success(f"Radar Nouveautés Actif")
+    st.sidebar.success("Scanner Limited Opérationnel")
     st.sidebar.write(f"🕒 {datetime.now().strftime('%H:%M:%S')}")
     if st.sidebar.button("Déconnexion"):
         st.session_state.clear()
@@ -210,14 +212,14 @@ else:
 
     data = scan_discount_flux(st.session_state['token'])
     if data:
-        df = pd.DataFrame(data).drop(columns=['_ts']) # On cache le timestamp technique
+        df = pd.DataFrame(data).drop(columns=['_ts'])
         
         def style_df(row):
             styles = [''] * len(row)
             decote = row['Décote (%)']
-            if decote >= 30: styles[8] = 'background-color: #28a745; color: white; font-weight: bold'
-            elif decote >= 20: styles[8] = 'background-color: #d4edda; color: #155724; font-weight: bold'
-            elif decote >= 10: styles[8] = 'background-color: #fff3cd; color: #856404; font-weight: bold'
+            if decote >= 30: styles[7] = 'background-color: #28a745; color: white; font-weight: bold'
+            elif decote >= 20: styles[7] = 'background-color: #d4edda; color: #155724; font-weight: bold'
+            elif decote >= 10: styles[7] = 'background-color: #fff3cd; color: #856404; font-weight: bold'
             return styles
 
         st.dataframe(
@@ -232,7 +234,7 @@ else:
             use_container_width=True, hide_index=True
         )
     else:
-        st.info("Attente de nouvelles mises en vente...")
+        st.info("Recherche en cours... (Le tableau s'affichera dès qu'une opportunité > 0% apparaît)")
     
     time.sleep(60)
     st.rerun()
