@@ -28,38 +28,47 @@ def sorare_sign_in(email, hashed_password=None, otp_attempt=None, otp_session_ch
         return requests.post(API_URL, json={'query': query, 'variables': {"input": input_data}}, headers=headers).json()
     except Exception as e: return {"errors": [{"message": str(e)}]}
 
-def get_all_market_data(watchlist, jwt_token):
+def get_market_data(slug, jwt_token):
     headers = {
         "Authorization": f"Bearer {jwt_token}",
         "JWT-AUD": AUDIENCE,
         "Content-Type": "application/json"
     }
     
-    # On construit une requête avec des ALIAS (p0, p1, etc.) pour contourner la restriction de liste
-    alias_queries = ""
-    for i, (name, slug) in enumerate(watchlist.items()):
-        alias_queries += f"""
-        p{i}: player(slug: "{slug}") {{
-          anyCards(rarities: [limited, rare]) {{
-            nodes {{
-              rarityTyped
-              liveSingleSaleOffer {{
-                receiverSide {{ wei }}
-              }}
-            }}
-          }}
-        }}
-        """
-    
-    full_query = f"query GetWatchlist {{ {alias_queries} }}"
-    
+    # NOUVELLE STRATÉGIE : On cherche dans le marché global par playerSlugs
+    query = """
+    query GetFloor($slug: String!) {
+      cards(playerSlugs: [$slug], rarities: [limited, rare]) {
+        nodes {
+          rarity
+          liveSingleSaleOffer {
+            receiverSide { wei }
+          }
+        }
+      }
+    }
+    """
     try:
-        res = requests.post(API_URL, json={'query': full_query}, headers=headers).json()
-        st.session_state['last_debug'] = res
-        return res.get('data', {})
-    except:
-        return {}
+        res = requests.post(API_URL, json={'query': query, 'variables': {'slug': slug}}, headers=headers).json()
+        st.session_state['last_debug'] = res 
+        
+        if "errors" in res: return None, None
 
+        nodes = res.get('data', {}).get('cards', {}).get('nodes', [])
+        lim_prices, rare_prices = [], []
+        
+        for n in nodes:
+            offer = n.get('liveSingleSaleOffer')
+            if offer and offer.get('receiverSide', {}).get('wei'):
+                price = float(offer['receiverSide']['wei']) / 1e18
+                rarity = str(n.get('rarity')).lower()
+                if rarity == 'limited': lim_prices.append(price)
+                elif rarity == 'rare': rare_prices.append(price)
+        
+        return (min(lim_prices) if lim_prices else None, min(rare_prices) if rare_prices else None)
+    except: return None, None
+
+# --- INTERFACE ---
 st.set_page_config(page_title="Sorare Arbitrage Tool", page_icon="🎯")
 st.title("🎯 Sorare Arbitrage Real-Time")
 
@@ -67,7 +76,6 @@ if 'final_token' not in st.session_state: st.session_state['final_token'] = None
 if 'otp_challenge' not in st.session_state: st.session_state['otp_challenge'] = None
 
 if not st.session_state['final_token']:
-    # --- FORMULAIRE DE CONNEXION ---
     if not st.session_state['otp_challenge']:
         with st.form("login"):
             st.subheader("🔑 Connexion")
@@ -85,8 +93,6 @@ if not st.session_state['final_token']:
                     elif data.get('jwtToken'):
                         st.session_state['final_token'] = data['jwtToken']['token']
                         st.rerun()
-                    else: st.error("Erreur de connexion.")
-                else: st.error("Compte introuvable.")
     else:
         with st.form("otp"):
             otp_code = st.text_input("Code 2FA")
@@ -95,41 +101,22 @@ if not st.session_state['final_token']:
                 if res.get('data', {}).get('signIn', {}).get('jwtToken'):
                     st.session_state['final_token'] = res['data']['signIn']['jwtToken']['token']
                     st.rerun()
-
 else:
-    # --- DASHBOARD ---
     st.success("✅ Marché connecté")
     watchlist = {"Hervé Koffi": "kouakou-herve-koffi", "Jordan Lefort": "jordan-lefort"}
-    
-    all_data = get_all_market_data(watchlist, st.session_state['final_token'])
-    
-    for i, (name, slug) in enumerate(watchlist.items()):
-        player_data = all_data.get(f"p{i}")
-        lim_prices, rare_prices = [], []
-        
-        if player_data and player_data.get('anyCards'):
-            for c in player_data['anyCards'].get('nodes', []):
-                offer = c.get('liveSingleSaleOffer')
-                if offer and offer.get('receiverSide', {}).get('wei'):
-                    price = float(offer['receiverSide']['wei']) / 1e18
-                    rarity = str(c.get('rarityTyped')).lower()
-                    if rarity == 'limited': lim_prices.append(price)
-                    elif rarity == 'rare': rare_prices.append(price)
 
+    for name, slug in watchlist.items():
+        p_lim, p_rare = get_market_data(slug, st.session_state['final_token'])
         col1, col2, col3, col4 = st.columns([2, 1, 1, 2])
         col1.markdown(f"**{name}**")
         
-        p_lim = min(lim_prices) if lim_prices else None
-        p_rare = min(rare_prices) if rare_prices else None
-
         if p_lim and p_rare:
             ratio = p_rare / p_lim
             col2.write(f"L: {p_lim:.4f} Ξ")
             col3.write(f"R: {p_rare:.4f} Ξ")
             if ratio < 4.0: col4.success(f"🔥 Ratio: {ratio:.2f}")
             else: col4.info(f"⚖️ Ratio: {ratio:.2f}")
-        else:
-            col4.warning("Pas d'offres.")
+        else: col4.warning("Pas d'offres.")
         st.divider()
 
     if st.checkbox("Debug JSON"):
