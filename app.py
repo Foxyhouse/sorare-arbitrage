@@ -3,7 +3,7 @@ import requests
 import bcrypt
 import pandas as pd
 
-# --- CONFIGURATION API ---
+# --- CONFIGURATION ---
 API_URL = "https://api.sorare.com/graphql"
 AUDIENCE = "sorare-app"
 
@@ -26,17 +26,18 @@ def get_limited_floor(player_slug, jwt_token):
     except: pass
     return None
 
-def scan_arbitrage_live_massive(jwt_token):
+def scan_audit_100(jwt_token):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE, "Content-Type": "application/json"}
     
-    # On passe à 500 pour ratisser très large et coller au site
+    # ÉTAPE 1 : ON FORCE LE FILTRE SUR LES RARES UNIQUEMENT
     query = """
-    query GetLiveFluxMassive {
+    query Get100Rares {
       tokens {
-        liveSingleSaleOffers(first: 500, sport: FOOTBALL) {
+        liveSingleSaleOffers(first: 100, rarities: [rare], sport: FOOTBALL) {
           nodes {
             senderSide {
               anyCards {
+                slug
                 rarityTyped
                 anyPlayer { displayName slug }
               }
@@ -49,68 +50,61 @@ def scan_arbitrage_live_massive(jwt_token):
     }
     """
     try:
-        res = requests.post(API_URL, json={'query': query}, headers=headers).json()
-        nodes = res.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
+        response = requests.post(API_URL, json={'query': query}, headers=headers)
+        res_json = response.json()
+        st.session_state['audit_raw'] = res_json # Debug
         
-        rare_findings = []
+        if "errors" in res_json:
+            st.error(f"Erreur API : {res_json['errors'][0]['message']}")
+            return []
+
+        nodes = res_json.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
+        
+        findings = []
         for n in nodes:
             cards = n.get('senderSide', {}).get('anyCards', [])
-            if not cards: continue
-            
-            card = cards[0]
-            # SÉCURITÉ : On vérifie la rareté sans se soucier de la casse (RARE ou rare)
-            current_rarity = str(card.get('rarityTyped', '')).lower()
-            
-            if current_rarity == 'rare':
-                rare_findings.append({
+            if cards:
+                c = cards[0]
+                findings.append({
                     "Date": n.get('startDate'),
-                    "name": card.get('anyPlayer', {}).get('displayName'),
-                    "slug": card.get('anyPlayer', {}).get('slug'),
+                    "name": c.get('anyPlayer', {}).get('displayName'),
+                    "slug": c.get('anyPlayer', {}).get('slug'),
+                    "rarity_check": c.get('rarityTyped'), # Pour vérifier la casse
                     "rare_price": float(n.get('receiverSide', {}).get('amounts', {}).get('eurCents', 0)) / 100
                 })
         
-        if not rare_findings: return []
-
-        # On traite les 25 premières Rares trouvées pour ne pas surcharger
-        rare_findings = rare_findings[:25]
-        alias_query = "query GetFloors { "
-        for i, item in enumerate(rare_findings):
-            alias_query += f'f{i}: tokens {{ liveSingleSaleOffers(playerSlug: "{item["slug"]}", rarities: [limited], first: 1) {{ nodes {{ receiverSide {{ amounts {{ eurCents }} }} }} }} }} '
-        alias_query += " }"
-        
-        res_floors = requests.post(API_URL, json={'query': alias_query}, headers=headers).json()
-        floors_data = res_floors.get('data', {})
-
-        final_data = []
-        for i, item in enumerate(rare_findings):
-            nodes_lim = floors_data.get(f'f{i}', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
-            lim_floor = float(nodes_lim[0]['receiverSide']['amounts']['eurCents']) / 100 if nodes_lim else None
-            ratio = item['rare_price'] / lim_floor if lim_floor else None
-            
-            final_data.append({
-                "Mise en ligne": item['Date'],
-                "Joueur": item['name'],
-                "Prix Rare (€)": item['rare_price'],
-                "Floor Limited (€)": lim_floor,
-                "Ratio": round(ratio, 2) if ratio else "N/A"
-            })
-        return final_data
-    except: return []
+        # ÉTAPE 2 : CALCUL DES RATIOS
+        for item in findings[:15]: # On limite le calcul intensif aux 15 premières
+            item['lim_price'] = get_limited_floor(item['slug'], jwt_token)
+            if item['lim_price']:
+                item['Ratio'] = round(item['rare_price'] / item['lim_price'], 2)
+            else:
+                item['Ratio'] = "N/A"
+                
+        return findings
+    except Exception as e:
+        st.error(f"Crash : {e}")
+        return []
 
 # --- UI ---
-st.set_page_config(page_title="Arbitrage Scanner Massive", layout="wide")
-st.title("🚀 Scanner Temps Réel (Force 500)")
+st.set_page_config(page_title="Audit Arbitrage 100", layout="wide")
+st.title("🔎 Audit Tactique : Flux 100 Rares")
 
-if 'token' not in st.session_state: 
-    # Ton bloc de login ici...
-    pass 
+if 'token' not in st.session_state:
+    st.warning("Connecte-toi d'abord.")
+else:
+    if st.button("🚀 Lancer l'Audit des 100 Rares"):
+        with st.spinner("Interrogation du marché live..."):
+            data = scan_audit_100(st.session_state['token'])
+            if data:
+                st.success(f"Trouvé {len(data)} offres Rares récentes.")
+                st.dataframe(pd.DataFrame(data), use_container_width=True)
+            else:
+                st.error("La liste est vide. Regarde le JSON Brut ci-dessous.")
 
-# Affichage direct pour ton test
-if st.button("🔄 Lancer le Scan Profond"):
-    with st.spinner("Analyse des 500 derniers mouvements de marché..."):
-        data = scan_arbitrage_live_massive(st.session_state['token'])
-        if data:
-            df = pd.DataFrame(data)
-            st.dataframe(df, use_container_width=True)
+    st.divider()
+    if st.checkbox("⚙️ VOIR LE JSON BRUT (LA SOURCE DE VÉRITÉ)"):
+        if 'audit_raw' in st.session_state:
+            st.json(st.session_state['audit_raw'])
         else:
-            st.error("Toujours rien. Vérifie ton jeton JWT ou filtre sur une autre rareté pour tester.")
+            st.info("Aucune donnée à afficher. Lance un audit.")
