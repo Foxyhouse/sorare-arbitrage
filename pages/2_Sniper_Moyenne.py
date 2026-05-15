@@ -55,7 +55,7 @@ def get_last_5_average(player_slug, is_in_season, rarity_typed, jwt_token):
         past_offers: allSingleSaleOffers(playerSlug: $slug, states: [SUCCESS], first: 50) {
           nodes { 
             senderSide { anyCards { rarityTyped seasonYear } }
-            receiverSide { amounts { eurCents } } 
+            receiverSide { anyCards { rarityTyped seasonYear } amounts { eurCents } } 
           }
         }
       }
@@ -67,11 +67,16 @@ def get_last_5_average(player_slug, is_in_season, rarity_typed, jwt_token):
         
         valid_prices = []
         for n in nodes:
-            cards = n.get('senderSide', {}).get('anyCards', [])
-            if not cards: continue
+            # Astuce : on regarde d'abord chez le vendeur, sinon chez l'acheteur (vente terminée)
+            cards = n.get('senderSide', {}).get('anyCards')
+            if not cards:
+                cards = n.get('receiverSide', {}).get('anyCards')
+            if not cards:
+                continue
+                
             card = cards[0]
-            
             card_is_in_season = (card.get('seasonYear') == CURRENT_SEASON_YEAR)
+            
             # Filtre strict : Même rareté (limited) ET même catégorie (In-Season / Classic)
             if card['rarityTyped'] == rarity_typed and card_is_in_season == is_in_season:
                 eur = n.get('receiverSide', {}).get('amounts', {}).get('eurCents')
@@ -143,8 +148,8 @@ def scan_discount_flux(jwt_token):
                     send_telegram_alert(msg)
                     st.session_state['sent_alerts'].add(card['slug'])
 
-                # Ajout au tableau (Uniquement si le prix est inférieur à la moyenne)
-                if discount_pct > -100:
+                # Ajout au tableau (Uniquement si la carte est moins chère que sa moyenne)
+                if discount_pct > 0:
                     findings.append({
                         "🛒": f"https://sorare.com/football/cards/{card['slug']}",
                         "Vente": formatted_time,
@@ -208,9 +213,15 @@ else:
                 styles[7] = 'background-color: #d4edda; color: #155724; font-weight: bold'
             return styles
 
+        # Affichage avec formatage propre des nombres (2 chiffres après la virgule)
         st.dataframe(
             df.style.apply(style_df, axis=1), 
-            column_config={"🛒": st.column_config.LinkColumn("Lien", display_text="Ouvrir")}, 
+            column_config={
+                "🛒": st.column_config.LinkColumn("Lien", display_text="Ouvrir"),
+                "Prix (€)": st.column_config.NumberColumn("Prix (€)", format="%.2f"),
+                "Moyenne 5V (€)": st.column_config.NumberColumn("Moyenne 5V (€)", format="%.2f"),
+                "Décote (%)": st.column_config.NumberColumn("Décote (%)", format="%.1f")
+            }, 
             use_container_width=True, 
             hide_index=True
         )
