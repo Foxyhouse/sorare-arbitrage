@@ -12,7 +12,7 @@ def get_segmented_floors(player_slug, is_in_season, jwt_token):
     query = """
     query GetSegFloors($slug: String!) {
       tokens {
-        all_offers: liveSingleSaleOffers(playerSlug: $slug, first: 500) {
+        all_offers: liveSingleSaleOffers(playerSlug: $slug, first: 5000) {
           nodes { 
             senderSide { anyCards { rarityTyped seasonYear } }
             receiverSide { amounts { eurCents } } 
