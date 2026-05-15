@@ -26,13 +26,12 @@ def sorare_sign_in(email, hashed_password=None, otp_attempt=None, otp_session_ch
     input_data = {"otpSessionChallenge": otp_session_challenge, "otpAttempt": otp_attempt} if otp_session_challenge else {"email": email, "password": hashed_password}
     return requests.post(API_URL, json={'query': query, 'variables': {"input": input_data}}).json()
 
-def run_audit_query(jwt_token):
+def get_live_market_flux(jwt_token):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE, "Content-Type": "application/json"}
     
-    # REQUÊTE MISE À JOUR : 'anyPlayer' au lieu de 'player' [Source: AnyCardInterface schema]
-    # On filtre sur FOOTBALL pour plus de pertinence
+    # Requête focalisée sur le MARCHÉ LIVE (liveSingleSaleOffers)
     query = """
-    query AuditMarket {
+    query GetLiveMarket {
       tokens {
         liveSingleSaleOffers(first: 50, sport: FOOTBALL) {
           nodes {
@@ -46,8 +45,12 @@ def run_audit_query(jwt_token):
                 }
               }
             }
-            receiverSide { amounts { eurCents } }
-            createdAt
+            receiverSide { 
+              amounts { 
+                eurCents 
+              } 
+            }
+            startDate
           }
         }
       }
@@ -58,31 +61,34 @@ def run_audit_query(jwt_token):
         res_json = response.json()
         st.session_state['full_api_response'] = res_json
         
-        if "errors" in res_json:
-            return [], f"Erreur API : {res_json['errors'][0]['message']}"
-            
         nodes = res_json.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
         
         raw_list = []
         for n in nodes:
-            cards = n.get('senderSide', {}).get('anyCards', [])
-            if cards:
-                c = cards[0]
-                player_info = c.get('anyPlayer', {}) # Correction ici
-                raw_list.append({
-                    "Date": n.get('createdAt'),
-                    "Joueur": player_info.get('displayName', 'N/A'),
-                    "Slug Joueur": player_info.get('slug', 'N/A'),
-                    "Rareté": c.get('rarityTyped'),
-                    "Prix (€)": float(n.get('receiverSide', {}).get('amounts', {}).get('eurCents', 0)) / 100
-                })
-        return raw_list, None
+            # On vérifie la présence du prix en Euros
+            eur_cents = n.get('receiverSide', {}).get('amounts', {}).get('eurCents')
+            
+            # Dans le marché live, si eur_cents est None, c'est peut-être une offre en ETH pur ou une erreur de data
+            if eur_cents is not None:
+                cards = n.get('senderSide', {}).get('anyCards', [])
+                if cards:
+                    c = cards[0]
+                    player_info = c.get('anyPlayer', {})
+                    raw_list.append({
+                        "Mise en ligne": n.get('startDate'),
+                        "Joueur": player_info.get('displayName', 'N/A'),
+                        "Rareté": c.get('rarityTyped'),
+                        "Prix (€)": float(eur_cents) / 100,
+                        "Slug Joueur": player_info.get('slug', 'N/A')
+                    })
+        return raw_list
     except Exception as e:
-        return [], f"Erreur : {str(e)}"
+        st.error(f"Erreur flux : {e}")
+        return []
 
-# --- UI STREAMLIT ---
-st.set_page_config(page_title="Audit Flux Sorare", layout="wide")
-st.title("🔎 Audit du Flux de Marché Football")
+# --- UI ---
+st.set_page_config(page_title="Flux Marché Live", layout="wide")
+st.title("⚽ Marché Live : Dernières annonces (Ventes directes)")
 
 if 'token' not in st.session_state: st.session_state['token'] = None
 
@@ -90,7 +96,7 @@ if not st.session_state['token']:
     with st.form("login"):
         e = st.text_input("Email", value="jacques.troispoils@gmail.com")
         p = st.text_input("Pass", type="password")
-        if st.form_submit_button("Lancer l'audit"):
+        if st.form_submit_button("Accéder au Marché Live"):
             salt = get_user_salt(e)
             if salt:
                 hp = bcrypt.hashpw(p.encode(), salt.encode()).decode()
@@ -99,19 +105,18 @@ if not st.session_state['token']:
                     st.session_state['token'] = res['data']['signIn']['jwtToken']['token']
                     st.rerun()
 else:
-    if st.button("🔄 Actualiser le flux"):
+    if st.sidebar.button("🔄 Rafraîchir le flux"):
         st.rerun()
-
-    data, error_msg = run_audit_query(st.session_state['token'])
+        
+    data = get_live_market_flux(st.session_state['token'])
     
-    if error_msg:
-        st.error(error_msg)
-    elif data:
-        st.success(f"{len(data)} dernières offres détectées")
+    if data:
         df = pd.DataFrame(data)
+        # Tri par date de mise en ligne (la plus récente en haut)
+        df = df.sort_values(by="Mise en ligne", ascending=False)
         st.dataframe(df, use_container_width=True)
     else:
-        st.warning("Aucune offre trouvée à cet instant.")
+        st.warning("En attente de nouvelles offres sur le marché...")
 
-    if st.checkbox("⚙️ Voir JSON Brut"):
+    if st.checkbox("⚙️ Debug JSON Brut"):
         st.json(st.session_state.get('full_api_response'))
