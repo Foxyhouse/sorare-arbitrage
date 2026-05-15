@@ -26,31 +26,14 @@ def sorare_sign_in(email, hashed_password=None, otp_attempt=None, otp_session_ch
     input_data = {"otpSessionChallenge": otp_session_challenge, "otpAttempt": otp_attempt} if otp_session_challenge else {"email": email, "password": hashed_password}
     return requests.post(API_URL, json={'query': query, 'variables': {"input": input_data}}).json()
 
-def get_limited_floor(player_slug, jwt_token):
-    headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE}
-    query = """
-    query GetLim($slug: String!) {
-      tokens {
-        liveSingleSaleOffers(playerSlug: $slug, rarities: [limited], first: 1) {
-          nodes { receiverSide { amounts { eurCents } } }
-        }
-      }
-    }
-    """
-    try:
-        res = requests.post(API_URL, json={'query': query, 'variables': {'slug': player_slug}}, headers=headers).json()
-        nodes = res.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
-        if nodes:
-            return float(nodes[0]['receiverSide']['amounts']['eurCents']) / 100
-    except: pass
-    return None
-
-def scan_arbitrage_live(jwt_token):
+def scan_arbitrage_live_200(jwt_token):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE, "Content-Type": "application/json"}
-    query = """
-    query GetLiveFlux {
+    
+    # 1. On capture les 200 dernières offres FOOTBALL
+    query_flux = """
+    query GetLiveFlux200 {
       tokens {
-        liveSingleSaleOffers(first: 50, sport: FOOTBALL) {
+        liveSingleSaleOffers(first: 200, sport: FOOTBALL) {
           nodes {
             senderSide {
               anyCards {
@@ -66,49 +49,66 @@ def scan_arbitrage_live(jwt_token):
     }
     """
     try:
-        res = requests.post(API_URL, json={'query': query}, headers=headers).json()
+        res = requests.post(API_URL, json={'query': query_flux}, headers=headers).json()
         nodes = res.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
         
-        rare_opportunities = []
+        rare_findings = []
         for n in nodes:
             cards = n.get('senderSide', {}).get('anyCards', [])
             if not cards: continue
             
             card = cards[0]
-            # On ne traite que les Rares [cite: 1023]
             if card.get('rarityTyped') == 'rare':
-                player_name = card.get('anyPlayer', {}).get('displayName')
-                player_slug = card.get('anyPlayer', {}).get('slug')
-                rare_price = float(n.get('receiverSide', {}).get('amounts', {}).get('eurCents', 0)) / 100
-                
-                # Check immédiat du floor Limited pour ce slug
-                lim_floor = get_limited_floor(player_slug, jwt_token)
-                
-                ratio = rare_price / lim_floor if lim_floor else None
-                
-                rare_opportunities.append({
-                    "Mis en ligne": n.get('startDate'),
-                    "Joueur": player_name,
-                    "Prix Rare (€)": rare_price,
-                    "Floor Limited (€)": lim_floor,
-                    "Ratio": round(ratio, 2) if ratio else "N/A",
-                    "Slug": player_slug
+                rare_findings.append({
+                    "Date": n.get('startDate'),
+                    "name": card.get('anyPlayer', {}).get('displayName'),
+                    "slug": card.get('anyPlayer', {}).get('slug'),
+                    "rare_price": float(n.get('receiverSide', {}).get('amounts', {}).get('eurCents', 0)) / 100
                 })
-        return rare_opportunities
-    except: return []
+        
+        if not rare_findings: return []
+
+        # 2. Requête groupée pour les Floors Limited (Aliasing)
+        # On limite aux 20 premières Rares trouvées pour la stabilité
+        rare_findings = rare_findings[:20]
+        alias_query = "query GetFloors { "
+        for i, item in enumerate(rare_findings):
+            alias_query += f'f{i}: tokens {{ liveSingleSaleOffers(playerSlug: "{item["slug"]}", rarities: [limited], first: 1) {{ nodes {{ receiverSide {{ amounts {{ eurCents }} }} }} }} }} '
+        alias_query += " }"
+        
+        res_floors = requests.post(API_URL, json={'query': alias_query}, headers=headers).json()
+        floors_data = res_floors.get('data', {})
+
+        final_data = []
+        for i, item in enumerate(rare_findings):
+            nodes_lim = floors_data.get(f'f{i}', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
+            lim_floor = float(nodes_lim[0]['receiverSide']['amounts']['eurCents']) / 100 if nodes_lim else None
+            
+            ratio = item['rare_price'] / lim_floor if lim_floor else None
+            
+            final_data.append({
+                "Mise en ligne": item['Date'],
+                "Joueur": item['name'],
+                "Prix Rare (€)": item['rare_price'],
+                "Floor Limited (€)": lim_floor,
+                "Ratio": round(ratio, 2) if ratio else "N/A"
+            })
+            
+        return final_data
+    except Exception as e:
+        return []
 
 # --- UI ---
-st.set_page_config(page_title="Arbitrage Scanner Live", layout="wide")
-st.title("🔥 Scanner d'Arbitrage : Dernières Rares")
+st.set_page_config(page_title="Arbitrage Scanner 200", layout="wide")
+st.title("🔥 Scanner d'Arbitrage (Top 200 Mouvements)")
 
 if 'token' not in st.session_state: st.session_state['token'] = None
 
 if not st.session_state['token']:
-    # Bloc connexion (identique au précédent)
     with st.form("login"):
         e = st.text_input("Email", value="jacques.troispoils@gmail.com")
         p = st.text_input("Pass", type="password")
-        if st.form_submit_button("Lancer le Scanner"):
+        if st.form_submit_button("Lancer le Scanner 200"):
             salt = get_user_salt(e)
             if salt:
                 hp = bcrypt.hashpw(p.encode(), salt.encode()).decode()
@@ -117,14 +117,13 @@ if not st.session_state['token']:
                     st.session_state['token'] = res['data']['signIn']['jwtToken']['token']
                     st.rerun()
 else:
-    if st.sidebar.button("🔄 Rafraîchir le flux"): st.rerun()
+    if st.sidebar.button("🔄 Scanner les 200 derniers"): st.rerun()
 
-    with st.spinner("Analyse des dernières pépites..."):
-        data = scan_arbitrage_live(st.session_state['token'])
+    with st.spinner("Analyse profonde des 200 dernières annonces..."):
+        data = scan_arbitrage_live_200(st.session_state['token'])
     
     if data:
         df = pd.DataFrame(data)
-        # Style pour repérer les bonnes affaires
         def color_ratio(val):
             try:
                 if float(val) < 4.0: return 'background-color: #d4edda; color: #155724; font-weight: bold'
@@ -133,4 +132,4 @@ else:
             
         st.dataframe(df.style.applymap(color_ratio, subset=['Ratio']), use_container_width=True)
     else:
-        st.info("Aucune carte Rare listée dans les 50 dernières annonces. Réessaie dans un instant.")
+        st.warning("Aucune carte Rare trouvée dans les 200 derniers mouvements.")
