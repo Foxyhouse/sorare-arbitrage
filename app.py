@@ -35,16 +35,18 @@ def get_market_data(slug, jwt_token):
         "Content-Type": "application/json"
     }
     
-    # On utilise 'players' (pluriel) mais on ne passe qu'un seul slug
+    # AJOUT CRUCIAL : '... on Player' pour autoriser l'accès à anyCards
     query = """
     query GetFloor($slugs: [String!]) {
       players(slugs: $slugs) {
-        anyCards(rarities: [limited, rare]) {
-          nodes {
-            rarityTyped
-            liveSingleSaleOffer {
-              receiverSide {
-                wei
+        ... on Player {
+          anyCards(rarities: [limited, rare]) {
+            nodes {
+              rarityTyped
+              liveSingleSaleOffer {
+                receiverSide {
+                  wei
+                }
               }
             }
           }
@@ -53,13 +55,11 @@ def get_market_data(slug, jwt_token):
     }
     """
     try:
-        # On envoie le slug dans une liste : [slug]
         res = requests.post(API_URL, json={'query': query, 'variables': {'slugs': [slug]}}, headers=headers).json()
         st.session_state['last_debug'] = res 
         
         if "errors" in res: return None, None
 
-        # On récupère le premier élément de la liste 'players'
         players_list = res.get('data', {}).get('players', [])
         if not players_list or not players_list[0]: return None, None
         
