@@ -13,13 +13,13 @@ try:
     DEFAULT_EMAIL = st.secrets["SORARE_EMAIL"]
     DEFAULT_PWD = st.secrets["SORARE_PASSWORD"]
 except Exception as e:
-    st.error("Erreur : Configurez vos secrets dans le dashboard Streamlit (TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, SORARE_EMAIL, SORARE_PASSWORD)")
+    st.error("Erreur : Configurez vos secrets dans le dashboard Streamlit.")
     st.stop()
 
 API_URL = "https://api.sorare.com/graphql"
 AUDIENCE = "sorare-app"
 CURRENT_SEASON_YEAR = 2026 
-MIN_DISCOUNT_PERCENT = 20 # 🎯 Le filtre pour l'alerte Telegram (20%)
+MIN_DISCOUNT_PERCENT = 20 # 🎯 Le filtre pour l'alerte Telegram (ex: 20% sous le floor)
 
 # --- ÉTAT DE LA SESSION ---
 if 'token' not in st.session_state: st.session_state['token'] = None
@@ -38,7 +38,6 @@ def sorare_sign_in(email, hashed_password=None, otp_attempt=None, otp_challenge=
       signIn(input: $input) {
         jwtToken(aud: "sorare-app") { token }
         otpSessionChallenge
-        errors { message }
       }
     }
     """
@@ -46,17 +45,17 @@ def sorare_sign_in(email, hashed_password=None, otp_attempt=None, otp_challenge=
     try: return requests.post(API_URL, json={'query': query, 'variables': variables}, timeout=10).json().get('data', {}).get('signIn', {})
     except: return {}
 
-# --- FONCTION : MOYENNE DES 5 DERNIÈRES VENTES (LIMITED) ---
-def get_last_5_average(player_slug, is_in_season, rarity_typed, jwt_token):
+# --- FONCTION : VRAI FLOOR ACTUEL DU MARCHÉ ---
+def get_floor_discount(player_slug, is_in_season, rarity_typed, jwt_token, p_now):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE}
-    # 🚨 CORRECTION : Le statut valide sur l'API Sorare est "ACCEPTED"
+    # On regarde les annonces actives pour trouver la prochaine carte la moins chère
     query = """
-    query GetPastSales($slug: String!) {
+    query GetSegFloors($slug: String!) {
       tokens {
-        past_offers: allSingleSaleOffers(playerSlug: $slug, states: [ACCEPTED], first: 50) {
+        all_offers: liveSingleSaleOffers(playerSlug: $slug, first: 20) {
           nodes { 
             senderSide { anyCards { rarityTyped seasonYear } }
-            receiverSide { anyCards { rarityTyped seasonYear } amounts { eurCents } } 
+            receiverSide { amounts { eurCents } } 
           }
         }
       }
@@ -64,33 +63,29 @@ def get_last_5_average(player_slug, is_in_season, rarity_typed, jwt_token):
     """
     try:
         res = requests.post(API_URL, json={'query': query, 'variables': {'slug': player_slug}}, headers=headers, timeout=10).json()
-        nodes = res.get('data', {}).get('tokens', {}).get('past_offers', {}).get('nodes', [])
+        nodes = res.get('data', {}).get('tokens', {}).get('all_offers', {}).get('nodes', [])
         
         valid_prices = []
         for n in nodes:
-            # Astuce : on regarde d'abord chez le vendeur, sinon chez l'acheteur (vente terminée)
             cards = n.get('senderSide', {}).get('anyCards')
-            if not cards:
-                cards = n.get('receiverSide', {}).get('anyCards')
-            if not cards:
-                continue
-                
+            if not cards: continue
             card = cards[0]
-            card_is_in_season = (card.get('seasonYear') == CURRENT_SEASON_YEAR)
+            card_is_in = (card.get('seasonYear') == CURRENT_SEASON_YEAR)
             
-            # Filtre strict : Même rareté (limited) ET même catégorie (In-Season / Classic)
-            if str(card.get('rarityTyped')).lower() == rarity_typed.lower() and card_is_in_season == is_in_season:
+            if str(card.get('rarityTyped')).lower() == rarity_typed.lower() and card_is_in == is_in_season:
                 eur = n.get('receiverSide', {}).get('amounts', {}).get('eurCents')
                 if eur:
                     valid_prices.append(round(float(eur) / 100, 2))
+        
+        valid_prices.sort()
+        
+        # Astuce : La nouvelle carte (p_now) est peut-être déjà dans la liste de l'API. 
+        # On la retire une fois pour la comparer au VRAI prix des concurrents.
+        if p_now in valid_prices:
+            valid_prices.remove(p_now)
             
-            # On s'arrête dès qu'on a nos 5 dernières ventes
-            if len(valid_prices) == 5:
-                break
-                
         if len(valid_prices) > 0:
-            avg = sum(valid_prices) / len(valid_prices)
-            return round(avg, 2), len(valid_prices)
+            return valid_prices[0], len(valid_prices)
         return None, 0
     except: return None, 0
 
@@ -119,20 +114,18 @@ def scan_discount_flux(jwt_token):
             eur = n.get('receiverSide', {}).get('amounts', {}).get('eurCents')
             cards = n.get('senderSide', {}).get('anyCards', [])
             
-            # Ciblage exclusif des LIMITED
             if eur and cards and str(cards[0].get('rarityTyped')).lower() == 'limited':
                 card = cards[0]
                 is_in = (card.get('seasonYear') == CURRENT_SEASON_YEAR)
                 p_now = round(float(eur) / 100, 2)
                 
-                # Calcul de la moyenne des ventes passées
-                avg_price, nb_sales = get_last_5_average(card['anyPlayer']['slug'], is_in, 'limited', jwt_token)
+                # Calcul basé sur la réalité du marché
+                true_floor, nb_market = get_floor_discount(card['anyPlayer']['slug'], is_in, 'limited', jwt_token, p_now)
                 
-                discount_pct = 0
-                if avg_price and avg_price > 0:
-                    discount_pct = round(((avg_price - p_now) / avg_price) * 100, 1)
+                discount_pct = 0.0
+                if true_floor and true_floor > 0:
+                    discount_pct = round(((true_floor - p_now) / true_floor) * 100, 1)
                 
-                # Formatage de l'heure UTC vers l'heure locale
                 raw_date = n.get('startDate', "")
                 try:
                     utc_dt = datetime.strptime(raw_date, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=tz.tzutc())
@@ -140,17 +133,15 @@ def scan_discount_flux(jwt_token):
                 except: formatted_time = raw_date
 
                 # Alerte Telegram
-                if discount_pct >= MIN_DISCOUNT_PERCENT and nb_sales >= 2 and card['slug'] not in st.session_state['sent_alerts']:
-                    msg = (f"🟨 *GROSSE DÉCOTE LIMITED : -{discount_pct}%*\n\n"
+                if discount_pct >= MIN_DISCOUNT_PERCENT and card['slug'] not in st.session_state['sent_alerts']:
+                    msg = (f"🟨 *UNDERCUT MASSIF : -{discount_pct}%*\n\n"
                            f"👤 {card['anyPlayer']['displayName']}\n"
-                           f"💰 Prix Listé : {p_now}€\n"
-                           f"📉 Moyenne ({nb_sales}V) : {avg_price}€\n"
+                           f"💰 Prix : {p_now}€ (Floor concurrent: {true_floor}€)\n"
                            f"🔗 [Acheter sur Sorare](https://sorare.com/football/cards/{card['slug']})")
                     send_telegram_alert(msg)
                     st.session_state['sent_alerts'].add(card['slug'])
 
-                # J'ai mis > -100 provisoirement pour que tu puisses voir le tableau se remplir avec les moyennes calculées !
-                # Tu pourras remettre > 0 plus tard pour masquer les annonces trop chères.
+                # J'affiche tout dans le tableau pour l'instant (même les offres nulles ou négatives) pour que tu vois le résultat
                 if discount_pct > -100:
                     findings.append({
                         "🛒": f"https://sorare.com/football/cards/{card['slug']}",
@@ -158,8 +149,8 @@ def scan_discount_flux(jwt_token):
                         "Joueur": card['anyPlayer']['displayName'],
                         "Cat": "🟢 In-Season" if is_in else "⚪ Classic",
                         "Prix (€)": p_now,
-                        "Moyenne 5V (€)": avg_price,
-                        "Vol": f"{nb_sales}/5",
+                        "Floor Actuel (€)": true_floor,
+                        "Annonces": nb_market,
                         "Décote (%)": discount_pct
                     })
                     
@@ -167,9 +158,8 @@ def scan_discount_flux(jwt_token):
     except: return []
 
 # --- INTERFACE STRICTE ---
-st.set_page_config(page_title="Sniper Vraie Valeur (Limited)", layout="wide")
+st.set_page_config(page_title="Sniper Décote (Limited)", layout="wide")
 
-# CAS 1 : Connexion
 if st.session_state['token'] is None:
     st.title("🔐 Connexion Sorare")
     if not st.session_state['otp_needed']:
@@ -196,7 +186,6 @@ if st.session_state['token'] is None:
                 st.rerun()
             else: st.error("OTP Invalide.")
 
-# CAS 2 : Scanner Actif
 else:
     st.sidebar.success(f"Scanner Limited Actif\n(Cible Telegram: -{MIN_DISCOUNT_PERCENT}%)")
     st.sidebar.write(f"🕒 Dernière màj : {datetime.now().strftime('%H:%M:%S')}")
@@ -208,20 +197,18 @@ else:
     if data:
         df = pd.DataFrame(data)
         
-        # Coloration : Ligne verte si la décote dépasse la cible configurée
         def style_df(row):
             styles = [''] * len(row)
             if row['Décote (%)'] >= MIN_DISCOUNT_PERCENT:
                 styles[7] = 'background-color: #d4edda; color: #155724; font-weight: bold'
             return styles
 
-        # Affichage avec formatage propre des nombres (2 chiffres après la virgule)
         st.dataframe(
             df.style.apply(style_df, axis=1), 
             column_config={
                 "🛒": st.column_config.LinkColumn("Lien", display_text="Ouvrir"),
                 "Prix (€)": st.column_config.NumberColumn("Prix (€)", format="%.2f"),
-                "Moyenne 5V (€)": st.column_config.NumberColumn("Moyenne 5V (€)", format="%.2f"),
+                "Floor Actuel (€)": st.column_config.NumberColumn("Floor Actuel (€)", format="%.2f"),
                 "Décote (%)": st.column_config.NumberColumn("Décote (%)", format="%.1f")
             }, 
             use_container_width=True, 
@@ -230,6 +217,5 @@ else:
     else:
         st.info("Recherche de cartes...")
     
-    # Auto-Refresh
     time.sleep(60)
     st.rerun()
