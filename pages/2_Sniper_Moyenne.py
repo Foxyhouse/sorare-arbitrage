@@ -19,7 +19,7 @@ except Exception as e:
 API_URL = "https://api.sorare.com/graphql"
 AUDIENCE = "sorare-app"
 CURRENT_SEASON_YEAR = 2026 
-MIN_DISCOUNT_PERCENT = 20 # 🎯 Le filtre pour l'alerte Telegram (ex: 20% sous le floor)
+MIN_DISCOUNT_PERCENT = 20 # 🎯 Le filtre pour l'alerte Telegram
 
 # --- ÉTAT DE LA SESSION ---
 if 'token' not in st.session_state: st.session_state['token'] = None
@@ -48,7 +48,6 @@ def sorare_sign_in(email, hashed_password=None, otp_attempt=None, otp_challenge=
 # --- FONCTION : VRAI FLOOR ACTUEL DU MARCHÉ ---
 def get_floor_discount(player_slug, is_in_season, rarity_typed, jwt_token, p_now):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE}
-    # On regarde les annonces actives pour trouver la prochaine carte la moins chère
     query = """
     query GetSegFloors($slug: String!) {
       tokens {
@@ -79,8 +78,6 @@ def get_floor_discount(player_slug, is_in_season, rarity_typed, jwt_token, p_now
         
         valid_prices.sort()
         
-        # Astuce : La nouvelle carte (p_now) est peut-être déjà dans la liste de l'API. 
-        # On la retire une fois pour la comparer au VRAI prix des concurrents.
         if p_now in valid_prices:
             valid_prices.remove(p_now)
             
@@ -119,7 +116,6 @@ def scan_discount_flux(jwt_token):
                 is_in = (card.get('seasonYear') == CURRENT_SEASON_YEAR)
                 p_now = round(float(eur) / 100, 2)
                 
-                # Calcul basé sur la réalité du marché
                 true_floor, nb_market = get_floor_discount(card['anyPlayer']['slug'], is_in, 'limited', jwt_token, p_now)
                 
                 discount_pct = 0.0
@@ -132,7 +128,6 @@ def scan_discount_flux(jwt_token):
                     formatted_time = utc_dt.astimezone(tz.tzlocal()).strftime("%H:%M:%S")
                 except: formatted_time = raw_date
 
-                # Alerte Telegram
                 if discount_pct >= MIN_DISCOUNT_PERCENT and card['slug'] not in st.session_state['sent_alerts']:
                     msg = (f"🟨 *UNDERCUT MASSIF : -{discount_pct}%*\n\n"
                            f"👤 {card['anyPlayer']['displayName']}\n"
@@ -141,8 +136,8 @@ def scan_discount_flux(jwt_token):
                     send_telegram_alert(msg)
                     st.session_state['sent_alerts'].add(card['slug'])
 
-                # J'affiche tout dans le tableau pour l'instant (même les offres nulles ou négatives) pour que tu vois le résultat
-                if discount_pct > -100:
+                # 🚨 LE FILTRE EST LÀ : On ne garde que les décotes strictement positives (> 0)
+                if discount_pct > 0:
                     findings.append({
                         "🛒": f"https://sorare.com/football/cards/{card['slug']}",
                         "Vente": formatted_time,
@@ -197,10 +192,18 @@ else:
     if data:
         df = pd.DataFrame(data)
         
+        # 🎨 LE CODE COULEUR EST LÀ :
         def style_df(row):
             styles = [''] * len(row)
-            if row['Décote (%)'] >= MIN_DISCOUNT_PERCENT:
-                styles[7] = 'background-color: #d4edda; color: #155724; font-weight: bold'
+            decote = row['Décote (%)']
+            
+            # Application de la couleur sur la colonne n°7 (Décote (%))
+            if decote >= 30:
+                styles[7] = 'background-color: #28a745; color: white; font-weight: bold' # Vert foncé
+            elif decote >= 20:
+                styles[7] = 'background-color: #d4edda; color: #155724; font-weight: bold' # Vert clair
+            elif decote >= 10:
+                styles[7] = 'background-color: #fff3cd; color: #856404; font-weight: bold' # Jaune
             return styles
 
         st.dataframe(
@@ -215,7 +218,7 @@ else:
             hide_index=True
         )
     else:
-        st.info("Recherche de cartes...")
+        st.info("Recherche de cartes sous-évaluées en cours...")
     
     time.sleep(60)
     st.rerun()
