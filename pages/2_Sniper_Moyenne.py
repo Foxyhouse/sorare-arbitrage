@@ -89,12 +89,24 @@ def get_floor_discount(player_slug, is_in_season, rarity_typed, jwt_token, p_now
 # --- SCANNER DE DÉCOTE (LIMITED) ---
 def scan_discount_flux(jwt_token):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE}
+    # 🚨 MISE À JOUR : On demande le score L10
     query = """
     query GetFlux {
       tokens {
         liveSingleSaleOffers(first: 100, sport: FOOTBALL) {
           nodes {
-            senderSide { anyCards { slug rarityTyped seasonYear anyPlayer { displayName slug } } }
+            senderSide { 
+              anyCards { 
+                slug 
+                rarityTyped 
+                seasonYear 
+                anyPlayer { 
+                  displayName 
+                  slug 
+                  averageScore(type: LAST_TEN_SO5_AVERAGE_SCORE)
+                } 
+              } 
+            }
             receiverSide { amounts { eurCents } }
             startDate
           }
@@ -113,14 +125,22 @@ def scan_discount_flux(jwt_token):
             
             if eur and cards and str(cards[0].get('rarityTyped')).lower() == 'limited':
                 card = cards[0]
+                
+                # --- NOUVEAU FILTRE L10 ---
+                l10 = card['anyPlayer'].get('averageScore')
+                if not l10 or float(l10) == 0.0:
+                    continue  # 🚫 On exclut immédiatement les joueurs à 0
+                    
                 is_in = (card.get('seasonYear') == CURRENT_SEASON_YEAR)
                 p_now = round(float(eur) / 100, 2)
                 
                 true_floor, nb_market = get_floor_discount(card['anyPlayer']['slug'], is_in, 'limited', jwt_token, p_now)
                 
-                discount_pct = 0.0
-                if true_floor and true_floor > 0:
-                    discount_pct = round(((true_floor - p_now) / true_floor) * 100, 1)
+                # --- NOUVEAU FILTRE RENTABILITÉ (< 1.10€) ---
+                if true_floor is None or true_floor < 1.10:
+                    continue  # 🚫 On ignore les cartes dont le floor est trop bas
+                
+                discount_pct = round(((true_floor - p_now) / true_floor) * 100, 1)
                 
                 raw_date = n.get('startDate', "")
                 try:
@@ -130,18 +150,19 @@ def scan_discount_flux(jwt_token):
 
                 if discount_pct >= MIN_DISCOUNT_PERCENT and card['slug'] not in st.session_state['sent_alerts']:
                     msg = (f"🟨 *UNDERCUT MASSIF : -{discount_pct}%*\n\n"
-                           f"👤 {card['anyPlayer']['displayName']}\n"
+                           f"👤 {card['anyPlayer']['displayName']} (L10: {l10})\n"
                            f"💰 Prix : {p_now}€ (Floor concurrent: {true_floor}€)\n"
                            f"🔗 [Acheter sur Sorare](https://sorare.com/football/cards/{card['slug']})")
                     send_telegram_alert(msg)
                     st.session_state['sent_alerts'].add(card['slug'])
 
-                # 🚨 LE FILTRE EST LÀ : On ne garde que les décotes strictement positives (> 0)
+                # Le filtre d'affichage (> 0) reste actif pour ne garder que les vraies bonnes affaires
                 if discount_pct > 0:
                     findings.append({
                         "🛒": f"https://sorare.com/football/cards/{card['slug']}",
                         "Vente": formatted_time,
                         "Joueur": card['anyPlayer']['displayName'],
+                        "L10": l10,
                         "Cat": "🟢 In-Season" if is_in else "⚪ Classic",
                         "Prix (€)": p_now,
                         "Floor Actuel (€)": true_floor,
@@ -192,24 +213,22 @@ else:
     if data:
         df = pd.DataFrame(data)
         
-        # 🎨 LE CODE COULEUR EST LÀ :
         def style_df(row):
             styles = [''] * len(row)
             decote = row['Décote (%)']
-            
-            # Application de la couleur sur la colonne n°7 (Décote (%))
             if decote >= 30:
-                styles[7] = 'background-color: #28a745; color: white; font-weight: bold' # Vert foncé
+                styles[8] = 'background-color: #28a745; color: white; font-weight: bold'
             elif decote >= 20:
-                styles[7] = 'background-color: #d4edda; color: #155724; font-weight: bold' # Vert clair
+                styles[8] = 'background-color: #d4edda; color: #155724; font-weight: bold'
             elif decote >= 10:
-                styles[7] = 'background-color: #fff3cd; color: #856404; font-weight: bold' # Jaune
+                styles[8] = 'background-color: #fff3cd; color: #856404; font-weight: bold'
             return styles
 
         st.dataframe(
             df.style.apply(style_df, axis=1), 
             column_config={
                 "🛒": st.column_config.LinkColumn("Lien", display_text="Ouvrir"),
+                "L10": st.column_config.NumberColumn("L10", format="%d"),
                 "Prix (€)": st.column_config.NumberColumn("Prix (€)", format="%.2f"),
                 "Floor Actuel (€)": st.column_config.NumberColumn("Floor Actuel (€)", format="%.2f"),
                 "Décote (%)": st.column_config.NumberColumn("Décote (%)", format="%.1f")
