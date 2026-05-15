@@ -49,10 +49,11 @@ def sorare_sign_in(email, hashed_password=None, otp_attempt=None, otp_challenge=
 # --- FONCTION : MOYENNE DES 5 DERNIÈRES VENTES (LIMITED) ---
 def get_last_5_average(player_slug, is_in_season, rarity_typed, jwt_token):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE}
+    # 🚨 CORRECTION : Le statut valide sur l'API Sorare est "ACCEPTED"
     query = """
     query GetPastSales($slug: String!) {
       tokens {
-        past_offers: allSingleSaleOffers(playerSlug: $slug, states: [SUCCESS], first: 50) {
+        past_offers: allSingleSaleOffers(playerSlug: $slug, states: [ACCEPTED], first: 50) {
           nodes { 
             senderSide { anyCards { rarityTyped seasonYear } }
             receiverSide { anyCards { rarityTyped seasonYear } amounts { eurCents } } 
@@ -78,7 +79,7 @@ def get_last_5_average(player_slug, is_in_season, rarity_typed, jwt_token):
             card_is_in_season = (card.get('seasonYear') == CURRENT_SEASON_YEAR)
             
             # Filtre strict : Même rareté (limited) ET même catégorie (In-Season / Classic)
-            if card['rarityTyped'] == rarity_typed and card_is_in_season == is_in_season:
+            if str(card.get('rarityTyped')).lower() == rarity_typed.lower() and card_is_in_season == is_in_season:
                 eur = n.get('receiverSide', {}).get('amounts', {}).get('eurCents')
                 if eur:
                     valid_prices.append(round(float(eur) / 100, 2))
@@ -99,7 +100,7 @@ def scan_discount_flux(jwt_token):
     query = """
     query GetFlux {
       tokens {
-        liveSingleSaleOffers(first: 150, sport: FOOTBALL) {
+        liveSingleSaleOffers(first: 100, sport: FOOTBALL) {
           nodes {
             senderSide { anyCards { slug rarityTyped seasonYear anyPlayer { displayName slug } } }
             receiverSide { amounts { eurCents } }
@@ -119,9 +120,9 @@ def scan_discount_flux(jwt_token):
             cards = n.get('senderSide', {}).get('anyCards', [])
             
             # Ciblage exclusif des LIMITED
-            if eur and cards and cards[0]['rarityTyped'] == 'limited':
+            if eur and cards and str(cards[0].get('rarityTyped')).lower() == 'limited':
                 card = cards[0]
-                is_in = (card['seasonYear'] == CURRENT_SEASON_YEAR)
+                is_in = (card.get('seasonYear') == CURRENT_SEASON_YEAR)
                 p_now = round(float(eur) / 100, 2)
                 
                 # Calcul de la moyenne des ventes passées
@@ -148,7 +149,8 @@ def scan_discount_flux(jwt_token):
                     send_telegram_alert(msg)
                     st.session_state['sent_alerts'].add(card['slug'])
 
-                # Ajout au tableau (Uniquement si la carte est moins chère que sa moyenne)
+                # J'ai mis > -100 provisoirement pour que tu puisses voir le tableau se remplir avec les moyennes calculées !
+                # Tu pourras remettre > 0 plus tard pour masquer les annonces trop chères.
                 if discount_pct > -100:
                     findings.append({
                         "🛒": f"https://sorare.com/football/cards/{card['slug']}",
@@ -226,7 +228,7 @@ else:
             hide_index=True
         )
     else:
-        st.info("Recherche de cartes sous-évaluées...")
+        st.info("Recherche de cartes...")
     
     # Auto-Refresh
     time.sleep(60)
