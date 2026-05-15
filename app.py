@@ -26,30 +26,39 @@ def sorare_sign_in(email, hashed_password=None, otp_attempt=None, otp_session_ch
     input_data = {"otpSessionChallenge": otp_session_challenge, "otpAttempt": otp_attempt} if otp_session_challenge else {"email": email, "password": hashed_password}
     return requests.post(API_URL, json={'query': query, 'variables': {"input": input_data}}).json()
 
-def get_live_market_flux(jwt_token):
-    headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE, "Content-Type": "application/json"}
-    
-    # Requête focalisée sur le MARCHÉ LIVE (liveSingleSaleOffers)
+def get_limited_floor(player_slug, jwt_token):
+    headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE}
     query = """
-    query GetLiveMarket {
+    query GetLim($slug: String!) {
+      tokens {
+        liveSingleSaleOffers(playerSlug: $slug, rarities: [limited], first: 1) {
+          nodes { receiverSide { amounts { eurCents } } }
+        }
+      }
+    }
+    """
+    try:
+        res = requests.post(API_URL, json={'query': query, 'variables': {'slug': player_slug}}, headers=headers).json()
+        nodes = res.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
+        if nodes:
+            return float(nodes[0]['receiverSide']['amounts']['eurCents']) / 100
+    except: pass
+    return None
+
+def scan_arbitrage_live(jwt_token):
+    headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE, "Content-Type": "application/json"}
+    query = """
+    query GetLiveFlux {
       tokens {
         liveSingleSaleOffers(first: 50, sport: FOOTBALL) {
           nodes {
             senderSide {
               anyCards {
-                slug
                 rarityTyped
-                anyPlayer { 
-                  displayName 
-                  slug
-                }
+                anyPlayer { displayName slug }
               }
             }
-            receiverSide { 
-              amounts { 
-                eurCents 
-              } 
-            }
+            receiverSide { amounts { eurCents } }
             startDate
           }
         }
@@ -57,46 +66,49 @@ def get_live_market_flux(jwt_token):
     }
     """
     try:
-        response = requests.post(API_URL, json={'query': query}, headers=headers)
-        res_json = response.json()
-        st.session_state['full_api_response'] = res_json
+        res = requests.post(API_URL, json={'query': query}, headers=headers).json()
+        nodes = res.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
         
-        nodes = res_json.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
-        
-        raw_list = []
+        rare_opportunities = []
         for n in nodes:
-            # On vérifie la présence du prix en Euros
-            eur_cents = n.get('receiverSide', {}).get('amounts', {}).get('eurCents')
+            cards = n.get('senderSide', {}).get('anyCards', [])
+            if not cards: continue
             
-            # Dans le marché live, si eur_cents est None, c'est peut-être une offre en ETH pur ou une erreur de data
-            if eur_cents is not None:
-                cards = n.get('senderSide', {}).get('anyCards', [])
-                if cards:
-                    c = cards[0]
-                    player_info = c.get('anyPlayer', {})
-                    raw_list.append({
-                        "Mise en ligne": n.get('startDate'),
-                        "Joueur": player_info.get('displayName', 'N/A'),
-                        "Rareté": c.get('rarityTyped'),
-                        "Prix (€)": float(eur_cents) / 100,
-                        "Slug Joueur": player_info.get('slug', 'N/A')
-                    })
-        return raw_list
-    except Exception as e:
-        st.error(f"Erreur flux : {e}")
-        return []
+            card = cards[0]
+            # On ne traite que les Rares [cite: 1023]
+            if card.get('rarityTyped') == 'rare':
+                player_name = card.get('anyPlayer', {}).get('displayName')
+                player_slug = card.get('anyPlayer', {}).get('slug')
+                rare_price = float(n.get('receiverSide', {}).get('amounts', {}).get('eurCents', 0)) / 100
+                
+                # Check immédiat du floor Limited pour ce slug
+                lim_floor = get_limited_floor(player_slug, jwt_token)
+                
+                ratio = rare_price / lim_floor if lim_floor else None
+                
+                rare_opportunities.append({
+                    "Mis en ligne": n.get('startDate'),
+                    "Joueur": player_name,
+                    "Prix Rare (€)": rare_price,
+                    "Floor Limited (€)": lim_floor,
+                    "Ratio": round(ratio, 2) if ratio else "N/A",
+                    "Slug": player_slug
+                })
+        return rare_opportunities
+    except: return []
 
 # --- UI ---
-st.set_page_config(page_title="Flux Marché Live", layout="wide")
-st.title("⚽ Marché Live : Dernières annonces (Ventes directes)")
+st.set_page_config(page_title="Arbitrage Scanner Live", layout="wide")
+st.title("🔥 Scanner d'Arbitrage : Dernières Rares")
 
 if 'token' not in st.session_state: st.session_state['token'] = None
 
 if not st.session_state['token']:
+    # Bloc connexion (identique au précédent)
     with st.form("login"):
         e = st.text_input("Email", value="jacques.troispoils@gmail.com")
         p = st.text_input("Pass", type="password")
-        if st.form_submit_button("Accéder au Marché Live"):
+        if st.form_submit_button("Lancer le Scanner"):
             salt = get_user_salt(e)
             if salt:
                 hp = bcrypt.hashpw(p.encode(), salt.encode()).decode()
@@ -105,18 +117,20 @@ if not st.session_state['token']:
                     st.session_state['token'] = res['data']['signIn']['jwtToken']['token']
                     st.rerun()
 else:
-    if st.sidebar.button("🔄 Rafraîchir le flux"):
-        st.rerun()
-        
-    data = get_live_market_flux(st.session_state['token'])
+    if st.sidebar.button("🔄 Rafraîchir le flux"): st.rerun()
+
+    with st.spinner("Analyse des dernières pépites..."):
+        data = scan_arbitrage_live(st.session_state['token'])
     
     if data:
         df = pd.DataFrame(data)
-        # Tri par date de mise en ligne (la plus récente en haut)
-        df = df.sort_values(by="Mise en ligne", ascending=False)
-        st.dataframe(df, use_container_width=True)
+        # Style pour repérer les bonnes affaires
+        def color_ratio(val):
+            try:
+                if float(val) < 4.0: return 'background-color: #d4edda; color: #155724; font-weight: bold'
+            except: pass
+            return ''
+            
+        st.dataframe(df.style.applymap(color_ratio, subset=['Ratio']), use_container_width=True)
     else:
-        st.warning("En attente de nouvelles offres sur le marché...")
-
-    if st.checkbox("⚙️ Debug JSON Brut"):
-        st.json(st.session_state.get('full_api_response'))
+        st.info("Aucune carte Rare listée dans les 50 dernières annonces. Réessaie dans un instant.")
