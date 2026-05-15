@@ -144,7 +144,7 @@ def scan_discount_flux(jwt_token):
                     st.session_state['sent_alerts'].add(card['slug'])
 
                 # On ajoute au tableau uniquement si la carte est moins chère que la moyenne
-                if discount_pct > 0:
+                if discount_pct > -100:
                     findings.append({
                         "🛒": f"https://sorare.com/football/cards/{card['slug']}",
                         "Vente": formatted_time,
