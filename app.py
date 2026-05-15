@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 API_URL = "https://api.sorare.com/graphql"
 AUDIENCE = "sorare-app"
 
-# --- AUTHENTIFICATION (VERSION ROBUSTE) ---
+# --- AUTHENTIFICATION ---
 def get_user_salt(email):
     try:
         res = requests.get(f"https://api.sorare.com/api/v1/users/{email}", timeout=5)
@@ -46,7 +46,7 @@ def get_limited_floor(player_slug, jwt_token):
     query = """
     query GetLim($slug: String!) {
       tokens {
-        liveSingleSaleOffers(playerSlug: $slug, first: 10) {
+        liveSingleSaleOffers(playerSlug: $slug, first: 15) {
           nodes {
             senderSide { anyCards { rarityTyped } }
             receiverSide { amounts { eurCents } }
@@ -56,12 +56,12 @@ def get_limited_floor(player_slug, jwt_token):
     }
     """
     try:
-        res = requests.post(API_URL, json={'query': query, 'variables': {'slug': player_slug}}, headers=headers).json()
+        res = requests.post(API_URL, json={'query': query, 'variables': {'slug': player_slug}}, headers=headers, timeout=10).json()
         nodes = res.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
         lim_prices = []
         for n in nodes:
             cards = n.get('senderSide', {}).get('anyCards', [])
-            if cards and cards[0].get('rarityTyped') == 'limited':
+            if cards and str(cards[0].get('rarityTyped')).lower() == 'limited':
                 price = n.get('receiverSide', {}).get('amounts', {}).get('eurCents')
                 if price: lim_prices.append(float(price) / 100)
         return min(lim_prices) if lim_prices else None
@@ -73,7 +73,7 @@ def scan_arbitrage_live(jwt_token):
     query = """
     query GetLiveFlux($since: ISO8601DateTime) {
       tokens {
-        liveSingleSaleOffers(first: 100, sport: FOOTBALL, updatedAfter: $since) {
+        liveSingleSaleOffers(first: 80, sport: FOOTBALL, updatedAfter: $since) {
           nodes {
             senderSide {
               anyCards {
@@ -90,7 +90,7 @@ def scan_arbitrage_live(jwt_token):
     }
     """
     try:
-        response = requests.post(API_URL, json={'query': query, 'variables': {'since': since_date}}, headers=headers)
+        response = requests.post(API_URL, json={'query': query, 'variables': {'since': since_date}}, headers=headers, timeout=15)
         res_json = response.json()
         nodes = res_json.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
         findings = []
@@ -107,74 +107,83 @@ def scan_arbitrage_live(jwt_token):
                     "Slug": c.get('anyPlayer', {}).get('slug'),
                     "Prix Rare (€)": float(eur_cents) / 100
                 })
+        
         findings = sorted(findings, key=lambda x: x['Mise en ligne'], reverse=True)
-        for item in findings[:15]: 
-            item['Floor Limited (€)'] = get_limited_floor(item['Slug'], jwt_token)
-            if item['Floor Limited (€)']:
-                item['Ratio'] = round(item['Prix Rare (€)'] / item['Floor Limited (€)'], 2)
-            else: item['Ratio'] = "N/A"
+        
+        # On limite le scan Limited pour éviter les timeouts
+        for item in findings[:12]: 
+            floor = get_limited_floor(item['Slug'], jwt_token)
+            item['Floor Limited (€)'] = floor
+            if floor and floor > 0:
+                item['Ratio'] = round(item['Prix Rare (€)'] / floor, 2)
+            else: 
+                item['Ratio'] = None
         return findings
     except: return []
 
 # --- INTERFACE ---
-st.set_page_config(page_title="Scanner Arbitrage", layout="wide")
+st.set_page_config(page_title="Arbitrage Sorare 2026", layout="wide")
 st.title("⚽ Scanner d'Arbitrage (Flux 24h)")
 
 if 'token' not in st.session_state: st.session_state['token'] = None
 if 'otp_challenge' not in st.session_state: st.session_state['otp_challenge'] = None
 
-# GESTION CONNEXION
 if not st.session_state['token']:
-    with st.container():
-        if not st.session_state['otp_challenge']:
-            with st.form("login"):
-                st.subheader("🔑 Connexion")
-                u_email = st.text_input("Email", value="jacques.troispoils@gmail.com")
-                u_pwd = st.text_input("Mot de passe", type="password")
-                if st.form_submit_button("Lancer le Scanner"):
-                    salt = get_user_salt(u_email)
-                    if salt:
-                        hpwd = bcrypt.hashpw(u_pwd.encode(), salt.encode()).decode()
-                        res = sorare_sign_in(u_email, hpwd)
-                        data = res.get('data', {}).get('signIn', {})
-                        if data.get('otpSessionChallenge'):
-                            st.session_state['otp_challenge'] = data['otpSessionChallenge']
-                            st.session_state['temp_email'] = u_email
-                            st.rerun()
-                        elif data.get('jwtToken'):
-                            st.session_state['token'] = data['jwtToken']['token']
-                            st.rerun()
-                        else: st.error(f"Échec : {data.get('errors', [{'message': 'Inconnu'}])[0]['message']}")
-                    else: st.error("Impossible de récupérer le sel.")
-        else:
-            with st.form("otp"):
-                st.subheader("📱 Code 2FA")
-                code = st.text_input("Saisir le code OTP")
-                if st.form_submit_button("Valider"):
-                    res = sorare_sign_in(st.session_state['temp_email'], otp_attempt=code, otp_session_challenge=st.session_state['otp_challenge'])
+    # Bloc Login (Inchangé)
+    if not st.session_state['otp_challenge']:
+        with st.form("login"):
+            st.subheader("🔑 Connexion")
+            u_email = st.text_input("Email", value="jacques.troispoils@gmail.com")
+            u_pwd = st.text_input("Mot de passe", type="password")
+            if st.form_submit_button("Lancer le Scanner"):
+                salt = get_user_salt(u_email)
+                if salt:
+                    hpwd = bcrypt.hashpw(u_pwd.encode(), salt.encode()).decode()
+                    res = sorare_sign_in(u_email, hpwd)
                     data = res.get('data', {}).get('signIn', {})
-                    if data.get('jwtToken'):
+                    if data.get('otpSessionChallenge'):
+                        st.session_state['otp_challenge'] = data['otpSessionChallenge']
+                        st.session_state['temp_email'] = u_email
+                        st.rerun()
+                    elif data.get('jwtToken'):
                         st.session_state['token'] = data['jwtToken']['token']
                         st.rerun()
-                    else: st.error("Code incorrect.")
+                    else: st.error("Erreur d'identifiants.")
+                else: st.error("Utilisateur introuvable.")
+    else:
+        with st.form("otp"):
+            code = st.text_input("Code OTP")
+            if st.form_submit_button("Valider"):
+                res = sorare_sign_in(st.session_state['temp_email'], otp_attempt=code, otp_session_challenge=st.session_state['otp_challenge'])
+                if res.get('data', {}).get('signIn', {}).get('jwtToken'):
+                    st.session_state['token'] = res['data']['signIn']['jwtToken']['token']
+                    st.rerun()
 
-# GESTION SCANNER
 else:
-    st.sidebar.success("✅ Connecté")
-    if st.sidebar.button("Déconnexion"):
-        st.session_state['token'] = None
-        st.session_state['otp_challenge'] = None
+    st.sidebar.button("🚪 Déconnexion", on_click=lambda: st.session_state.clear())
+    
+    if st.button("🔄 Rafraîchir le flux"):
         st.rerun()
 
     with st.spinner("Analyse du marché..."):
-        data = scan_arbitrage_live(st.session_state['token'])
+        results = scan_arbitrage_live(st.session_state['token'])
     
-    if data:
-        df = pd.DataFrame(data).drop(columns=['Slug'])
+    if results:
+        df = pd.DataFrame(results).drop(columns=['Slug'])
+        
+        # --- CORRECTION DU STYLE ( Pandas 2.x ) ---
         def color_ratio(val):
             try:
-                if float(val) < 4.0: return 'background-color: #d4edda; color: #155724; font-weight: bold'
-            except: pass
+                # On ne colorie que si c'est un nombre et < 4.0
+                if val is not None and float(val) < 4.0:
+                    return 'background-color: #d4edda; color: #155724; font-weight: bold'
+            except:
+                pass
             return ''
-        st.dataframe(df.style.applymap(color_ratio, subset=['Ratio']), use_container_width=True)
-    else: st.warning("Aucune donnée.")
+
+        # Utilisation de .map() au lieu de .applymap() pour la compatibilité
+        styled_df = df.style.map(color_ratio, subset=['Ratio'])
+        
+        st.dataframe(styled_df, use_container_width=True)
+    else:
+        st.warning("Aucune Rare trouvée dans le flux actuel.")
