@@ -5,7 +5,7 @@ import bcrypt
 API_URL = "https://api.sorare.com/graphql"
 AUDIENCE = "sorare-app"
 
-# --- 1. AUTHENTIFICATION BLINDÉE ---
+# --- 1. AUTHENTIFICATION ---
 def get_user_salt(email):
     try:
         res = requests.get(f"https://api.sorare.com/api/v1/users/{email}")
@@ -37,14 +37,16 @@ def get_market_data(slug, jwt_token):
         "Content-Type": "application/json"
     }
     
-    # LA REQUÊTE : 'anyCards', sans 'nodes', avec 'price' en euros
+    # LA REQUÊTE : Le prix se trouve dans le "receiverSide" de l'offre
     query = """
     query GetFloor($slugs: [String!]) {
       anyCards(playerSlugs: $slugs, rarities: [limited, rare]) {
         ... on Card {
           rarity
           liveSingleSaleOffer {
-            price { eur }
+            receiverSide {
+              amounts { eur }
+            }
           }
         }
       }
@@ -63,11 +65,14 @@ def get_market_data(slug, jwt_token):
             if not c: continue
             
             offer = c.get('liveSingleSaleOffer')
-            if offer and offer.get('price') and offer['price'].get('eur'):
-                val = float(offer['price']['eur'])
-                rarity = c.get('rarity')
-                if rarity == 'limited': lim_prices.append(val)
-                elif rarity == 'rare': rare_prices.append(val)
+            if offer:
+                # Extraction du prix depuis receiverSide -> amounts -> eur
+                amounts = offer.get('receiverSide', {}).get('amounts', {})
+                if amounts and amounts.get('eur'):
+                    val = float(amounts['eur'])
+                    rarity = c.get('rarity')
+                    if rarity == 'limited': lim_prices.append(val)
+                    elif rarity == 'rare': rare_prices.append(val)
         
         return (min(lim_prices) if lim_prices else None, min(rare_prices) if rare_prices else None)
     except: return None, None
