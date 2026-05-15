@@ -35,10 +35,10 @@ def get_market_data(slug, jwt_token):
         "Content-Type": "application/json"
     }
     
-    # Remplacement de 'rarity' par 'rarityTyped' comme suggéré par l'API
+    # Requête sur UN SEUL joueur (slug: String!) pour respecter la contrainte de l'API
     query = """
-    query GetFloor($slugs: [String!]) {
-      players(slugs: $slugs) {
+    query GetFloor($slug: String!) {
+      player(slug: $slug) {
         anyCards(rarities: [limited, rare]) {
           nodes {
             rarityTyped
@@ -53,20 +53,19 @@ def get_market_data(slug, jwt_token):
     }
     """
     try:
-        res = requests.post(API_URL, json={'query': query, 'variables': {'slugs': [slug]}}, headers=headers).json()
+        res = requests.post(API_URL, json={'query': query, 'variables': {'slug': slug}}, headers=headers).json()
         st.session_state['last_debug'] = res 
         
         if "errors" in res: return None, None
 
-        players = res.get('data', {}).get('players', [])
-        if not players or not players[0]: return None, None
+        player_node = res.get('data', {}).get('player')
+        if not player_node: return None, None
         
-        cards = players[0].get('anyCards', {}).get('nodes', [])
+        cards = player_node.get('anyCards', {}).get('nodes', [])
         lim_prices, rare_prices = [], []
         
         for c in cards:
             if not c: continue
-            
             offer = c.get('liveSingleSaleOffer')
             if offer:
                 receiver = offer.get('receiverSide', {})
