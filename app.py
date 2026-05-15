@@ -105,7 +105,7 @@ def scan_and_alert(jwt_token):
                 ratio = round(p_now / f_lim, 2) if f_lim else 99
                 
                 # Alerte Telegram
-                if ratio < 3.5 and card['slug'] not in st.session_state['sent_alerts']:
+                if ratio < 1.5 and card['slug'] not in st.session_state['sent_alerts']:
                     send_telegram_alert(f"🚀 *PÉPITE !* {card['anyPlayer']['displayName']} à {p_now}€ (Ratio: {ratio})\n[Lien](https://sorare.com/football/cards/{card['slug']})")
                     st.session_state['sent_alerts'].add(card['slug'])
 
