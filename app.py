@@ -5,7 +5,7 @@ import bcrypt
 API_URL = "https://api.sorare.com/graphql"
 AUDIENCE = "sorare-app"
 
-# --- AUTHENTIFICATION ---
+# --- 1. AUTHENTIFICATION BLINDÉE ---
 def get_user_salt(email):
     try:
         res = requests.get(f"https://api.sorare.com/api/v1/users/{email}")
@@ -29,7 +29,7 @@ def sorare_sign_in(email, hashed_password=None, otp_attempt=None, otp_session_ch
         return requests.post(API_URL, json={'query': query, 'variables': {"input": input_data}}, headers=headers).json()
     except Exception as e: return {"errors": [{"message": str(e)}]}
 
-# --- RÉCUPÉRATION DES PRIX (Sans le dossier 'nodes') ---
+# --- 2. RÉCUPÉRATION DES PRIX ---
 def get_market_data(slug, jwt_token):
     headers = {
         "Authorization": f"Bearer {jwt_token}",
@@ -37,15 +37,14 @@ def get_market_data(slug, jwt_token):
         "Content-Type": "application/json"
     }
     
-    # LA REQUÊTE FINALE : On demande les champs DIRECTEMENT sous anyCards
-    # On ajoute le fragment '... on Card' car c'est une interface technique
+    # LA REQUÊTE : 'anyCards', sans 'nodes', avec 'price' en euros
     query = """
     query GetFloor($slugs: [String!]) {
       anyCards(playerSlugs: $slugs, rarities: [limited, rare]) {
         ... on Card {
           rarity
           liveSingleSaleOffer {
-            priceInFiat { eur }
+            price { eur }
           }
         }
       }
@@ -57,18 +56,15 @@ def get_market_data(slug, jwt_token):
         
         if "errors" in res: return None, None
 
-        # On lit directement la liste 'anyCards', plus besoin de '.get("nodes")'
         cards = res.get('data', {}).get('anyCards', [])
-        
         lim_prices, rare_prices = [], []
         
         for c in cards:
-            # Sécurité pour éviter les éléments vides
             if not c: continue
             
             offer = c.get('liveSingleSaleOffer')
-            if offer and offer.get('priceInFiat') and offer['priceInFiat'].get('eur'):
-                val = float(offer['priceInFiat']['eur'])
+            if offer and offer.get('price') and offer['price'].get('eur'):
+                val = float(offer['price']['eur'])
                 rarity = c.get('rarity')
                 if rarity == 'limited': lim_prices.append(val)
                 elif rarity == 'rare': rare_prices.append(val)
@@ -76,9 +72,9 @@ def get_market_data(slug, jwt_token):
         return (min(lim_prices) if lim_prices else None, min(rare_prices) if rare_prices else None)
     except: return None, None
 
-# --- INTERFACE UTILISATEUR ---
-st.set_page_config(page_title="Sorare Arbitrage Tool", page_icon="💶")
-st.title("💶 Sorare Arbitrage Real-Time")
+# --- 3. INTERFACE UTILISATEUR ---
+st.set_page_config(page_title="Sorare Arbitrage Tool", page_icon="🎯")
+st.title("🎯 Sorare Arbitrage Real-Time")
 
 if 'final_token' not in st.session_state: st.session_state['final_token'] = None
 if 'otp_challenge' not in st.session_state: st.session_state['otp_challenge'] = None
