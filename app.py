@@ -35,17 +35,16 @@ def get_market_data(slug, jwt_token):
         "Content-Type": "application/json"
     }
     
+    # Remplacement de 'cards' par 'tokens' dans le dossier du joueur
     query = """
-    query GetFloor($slugs: [String!]) {
-      players(slugs: $slugs) {
-        ... on Player {
-          cards(rarities: [limited, rare]) {
-            nodes {
-              rarity
-              liveSingleSaleOffer {
-                receiverSide {
-                  wei
-                }
+    query GetFloor($slug: String!) {
+      player(slug: $slug) {
+        tokens(rarities: [limited, rare]) {
+          nodes {
+            rarity
+            liveSingleSaleOffer {
+              receiverSide {
+                wei
               }
             }
           }
@@ -54,26 +53,27 @@ def get_market_data(slug, jwt_token):
     }
     """
     try:
-        res = requests.post(API_URL, json={'query': query, 'variables': {'slugs': [slug]}}, headers=headers).json()
+        res = requests.post(API_URL, json={'query': query, 'variables': {'slug': slug}}, headers=headers).json()
         st.session_state['last_debug'] = res 
         
         if "errors" in res: return None, None
 
-        players = res.get('data', {}).get('players', [])
-        if not players or not players[0]: return None, None
+        player_data = res.get('data', {}).get('player')
+        if not player_data: return None, None
         
-        cards = players[0].get('cards', {}).get('nodes', [])
+        # On lit le tableau "tokens" au lieu de "cards"
+        tokens = player_data.get('tokens', {}).get('nodes', [])
         lim_prices, rare_prices = [], []
         
-        for c in cards:
-            if not c: continue
+        for t in tokens:
+            if not t: continue
             
-            offer = c.get('liveSingleSaleOffer')
+            offer = t.get('liveSingleSaleOffer')
             if offer:
                 receiver = offer.get('receiverSide', {})
                 if receiver and receiver.get('wei'):
                     val = float(receiver['wei']) / 1e18
-                    rarity = c.get('rarity')
+                    rarity = t.get('rarity')
                     if rarity == 'limited': lim_prices.append(val)
                     elif rarity == 'rare': rare_prices.append(val)
         
