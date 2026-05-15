@@ -35,10 +35,9 @@ def get_market_data(slug, jwt_token):
         "Content-Type": "application/json"
     }
     
-    # On passe par le "player" pour lister ses "cards", et on utilise l'extraction de prix qui a fonctionné
     query = """
-    query GetFloor($slug: String!) {
-      player(slug: $slug) {
+    query GetFloor($slugs: [String!]) {
+      players(slugs: $slugs) {
         cards(rarities: [limited, rare]) {
           nodes {
             rarity
@@ -53,16 +52,15 @@ def get_market_data(slug, jwt_token):
     }
     """
     try:
-        res = requests.post(API_URL, json={'query': query, 'variables': {'slug': slug}}, headers=headers).json()
+        res = requests.post(API_URL, json={'query': query, 'variables': {'slugs': [slug]}}, headers=headers).json()
         st.session_state['last_debug'] = res 
         
         if "errors" in res: return None, None
 
-        # On descend dans la hiérarchie : data -> player -> cards -> nodes
-        player_data = res.get('data', {}).get('player')
-        if not player_data: return None, None
+        players = res.get('data', {}).get('players', [])
+        if not players or not players[0]: return None, None
         
-        cards = player_data.get('cards', {}).get('nodes', [])
+        cards = players[0].get('cards', {}).get('nodes', [])
         lim_prices, rare_prices = [], []
         
         for c in cards:
