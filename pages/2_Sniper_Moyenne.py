@@ -3,10 +3,10 @@ import requests
 import bcrypt
 import pandas as pd
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from dateutil import tz
 
-# --- CONFIGURATION (SECRETS) ---
+# --- CONFIGURATION ---
 try:
     TELEGRAM_TOKEN = st.secrets["TELEGRAM_TOKEN"]
     TELEGRAM_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
@@ -25,17 +25,20 @@ MIN_DISCOUNT_PERCENT = 20
 if 'token' not in st.session_state: st.session_state['token'] = None
 if 'sent_alerts' not in st.session_state: st.session_state['sent_alerts'] = set()
 
-def send_telegram_alert(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    try: requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}, timeout=5)
-    except: pass
+# --- HELPERS ---
+def get_eur_price(amounts_list):
+    """Extrait proprement le prix en EUR parmi les devises (ETH, EUR, etc.)"""
+    for price in amounts_list:
+        if price.get('eurCents'):
+            return float(price['eurCents']) / 100
+    return None
 
-def get_floor_price(player_slug, is_in_season, rarity, jwt_token, p_now):
+def get_floor_price(player_slug, is_in_season, jwt_token, p_now):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE}
     query = """
     query GetFloor($slug: String!) {
       tokens {
-        liveSingleSaleOffers(playerSlug: $slug, first: 20) {
+        liveSingleSaleOffers(playerSlug: $slug, first: 15) {
           nodes { 
             senderSide { anyCards { rarityTyped seasonYear } }
             receiverSide { amounts { eurCents } } 
@@ -45,17 +48,14 @@ def get_floor_price(player_slug, is_in_season, rarity, jwt_token, p_now):
     }
     """
     try:
-        res = requests.post(API_URL, json={'query': query, 'variables': {'slug': player_slug}}, headers=headers, timeout=10).json()
-        nodes = res.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
+        r = requests.post(API_URL, json={'query': query, 'variables': {'slug': player_slug}}, headers=headers, timeout=10).json()
+        nodes = r.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
         prices = []
         for n in nodes:
-            cards = n.get('senderSide', {}).get('anyCards', [])
-            if not cards: continue
-            card = cards[0]
-            if card['rarityTyped'].lower() == rarity.lower() and (card['seasonYear'] == CURRENT_SEASON_YEAR) == is_in_season:
-                amounts = n.get('receiverSide', {}).get('amounts', [])
-                if amounts:
-                    prices.append(float(amounts[0]['eurCents']) / 100)
+            card = n['senderSide']['anyCards'][0]
+            if card['rarityTyped'] == 'limited' and (card['seasonYear'] == CURRENT_SEASON_YEAR) == is_in_season:
+                p = get_eur_price(n['receiverSide']['amounts'])
+                if p: prices.append(p)
         prices.sort()
         if p_now in prices: prices.remove(p_now)
         return prices[0] if prices else None
@@ -66,7 +66,7 @@ def scan_flux(jwt_token):
     query = """
     query GetRecent {
       tokens {
-        liveSingleSaleOffers(first: 80, sport: FOOTBALL) {
+        liveSingleSaleOffers(first: 60, sport: FOOTBALL) {
           nodes {
             startDate
             receiverSide { amounts { eurCents } }
@@ -75,11 +75,7 @@ def scan_flux(jwt_token):
                 slug
                 rarityTyped
                 seasonYear
-                anyPlayer {
-                  displayName
-                  slug
-                  averageScore(type: LAST_FIFTEEN_SO5_AVERAGE_SCORE)
-                }
+                anyPlayer { displayName slug averageScore(type: LAST_FIFTEEN_SO5_AVERAGE_SCORE) }
               }
             }
           }
@@ -91,7 +87,7 @@ def scan_flux(jwt_token):
         r = requests.post(API_URL, json={'query': query}, headers=headers, timeout=15).json()
         nodes = r.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
         
-        # Tri par date de début (les plus récents en haut)
+        # Tri immédiat par date
         nodes.sort(key=lambda x: x.get('startDate', ''), reverse=True)
         
         findings = []
@@ -99,87 +95,69 @@ def scan_flux(jwt_token):
 
         for n in nodes:
             cards = n.get('senderSide', {}).get('anyCards', [])
-            amounts = n.get('receiverSide', {}).get('amounts', [])
-            if not cards or not amounts: continue
+            if not cards or cards[0]['rarityTyped'] != 'limited': continue
             
-            card = cards[0]
-            if card['rarityTyped'] != 'limited': continue
-            
-            player = card['anyPlayer']
+            p_now = get_eur_price(n['receiverSide']['amounts'])
+            if not p_now: continue
+
+            player = cards[0]['anyPlayer']
             l15 = player.get('averageScore', 0)
             if not l15 or l15 == 0: continue
 
-            p_now = float(amounts[0]['eurCents']) / 100
-            is_in = card['seasonYear'] == CURRENT_SEASON_YEAR
+            is_in = cards[0]['seasonYear'] == CURRENT_SEASON_YEAR
             
-            # Calcul du temps écoulé
-            try:
-                start_dt = datetime.strptime(n['startDate'], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=tz.tzutc())
-                diff_min = int((now - start_dt).total_seconds() // 60)
-            except: diff_min = 999
+            # Temps écoulé
+            start_dt = datetime.strptime(n['startDate'], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=tz.tzutc())
+            diff_min = int((now - start_dt).total_seconds() // 60)
+            if diff_min > 120: continue # On regarde les 2 dernières heures
 
-            # On ne garde que les nouveautés de moins de 60 min pour être réactif
-            if diff_min > 60: continue 
-
-            floor = get_floor_price(player['slug'], is_in, 'limited', jwt_token, p_now)
+            floor = get_floor_price(player['slug'], is_in, jwt_token, p_now)
             
             if floor and floor >= 1.10:
                 discount = round(((floor - p_now) / floor) * 100, 1)
                 
-                # J'affiche tout ce qui est > -100 pour que tu vois le tableau bouger
-                if discount > -100:
+                # J'affiche tout > 0 pour voir si ça mord
+                if discount > 0:
                     findings.append({
-                        "🛒": f"https://sorare.com/football/cards/{card['slug']}",
+                        "🛒": f"https://sorare.com/football/cards/{cards[0]['slug']}",
                         "Âge": f"{diff_min} min",
                         "Joueur": player['displayName'],
                         "L15": l15,
                         "Prix (€)": p_now,
                         "Floor (€)": floor,
                         "Décote (%)": discount,
-                        "_date": n['startDate']
+                        "_ts": n['startDate']
                     })
                     
-                    if discount >= MIN_DISCOUNT_PERCENT and card['slug'] not in st.session_state['sent_alerts']:
-                        send_telegram_alert(f"🚀 SNIPE : {player['displayName']} -{discount}% ({p_now}€)")
-                        st.session_state['sent_alerts'].add(card['slug'])
+                    if discount >= MIN_DISCOUNT_PERCENT and cards[0]['slug'] not in st.session_state['sent_alerts']:
+                        msg = f"🚀 SNIPE : {player['displayName']} -{discount}% ({p_now}€)"
+                        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
+                        st.session_state['sent_alerts'].add(cards[0]['slug'])
 
         return findings
     except Exception as e:
-        st.error(f"Erreur technique : {e}")
+        st.error(f"Erreur : {e}")
         return []
 
 # --- UI ---
-st.set_page_config(page_title="Sniper V2", layout="wide")
+st.set_page_config(page_title="Sniper V3", layout="wide")
 
 if st.session_state['token'] is None:
-    if st.button("🚀 Connexion Sorare"):
-        try:
-            r_salt = requests.get(f"https://api.sorare.com/api/v1/users/{DEFAULT_EMAIL}").json()
-            hpwd = bcrypt.hashpw(DEFAULT_PWD.encode(), r_salt['salt'].encode()).decode()
-            
-            q_sign = """mutation s($i: signInInput!){ signIn(input: $i){ jwtToken(aud: "sorare-app"){ token } } }"""
-            v_sign = {"i": {"email": DEFAULT_EMAIL, "password": hpwd}}
-            res = requests.post(API_URL, json={'query': q_sign, 'variables': v_sign}).json()
-            
-            st.session_state['token'] = res['data']['signIn']['jwtToken']['token']
-            st.rerun()
-        except: st.error("Échec connexion.")
+    if st.button("🚀 Connexion Rapide"):
+        r_salt = requests.get(f"https://api.sorare.com/api/v1/users/{DEFAULT_EMAIL}").json()
+        hpwd = bcrypt.hashpw(DEFAULT_PWD.encode(), r_salt['salt'].encode()).decode()
+        q = """mutation s($i: signInInput!){ signIn(input: $i){ jwtToken(aud: "sorare-app"){ token } } }"""
+        res = requests.post(API_URL, json={'query': q, 'variables': {"i": {"email": DEFAULT_EMAIL, "password": hpwd}}}).json()
+        st.session_state['token'] = res['data']['signIn']['jwtToken']['token']
+        st.rerun()
 else:
-    st.sidebar.success("Scanner Nouveautés Actif")
-    results = scan_flux(st.session_state['token'])
-    
-    if results:
-        df = pd.DataFrame(results).drop(columns=['_date'])
-        
-        def color_decote(val):
-            color = 'white'
-            if val >= 25: color = '#28a745'
-            elif val >= 15: color = '#ffc107'
-            return f'background-color: {color}'
-
-        st.dataframe(df.style.applymap(color_decote, subset=['Décote (%)']), use_container_width=True, hide_index=True)
+    st.sidebar.success("Radar Nouveautés ON")
+    data = scan_flux(st.session_state['token'])
+    if data:
+        df = pd.DataFrame(data).drop(columns=['_ts'])
+        st.dataframe(df, use_container_width=True, hide_index=True)
     else:
-        st.info("Recherche de nouvelles mises en vente (Limited, L15 > 0)...")
-
+        st.info("Attente de nouvelles cartes Limited (L15 > 0)...")
+    
     time.sleep(60)
     st.rerun()
