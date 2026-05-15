@@ -28,61 +28,37 @@ def sorare_sign_in(email, hashed_password=None, otp_attempt=None, otp_session_ch
         return requests.post(API_URL, json={'query': query, 'variables': {"input": input_data}}, headers=headers).json()
     except Exception as e: return {"errors": [{"message": str(e)}]}
 
-def get_market_data(slug, jwt_token):
+def get_all_market_data(watchlist, jwt_token):
     headers = {
         "Authorization": f"Bearer {jwt_token}",
         "JWT-AUD": AUDIENCE,
         "Content-Type": "application/json"
     }
     
-    # LA RUSE : Utiliser 'players' (pluriel) mais forcer le type 'Player' à l'intérieur
-    query = """
-    query GetFloor($slugs: [String!]) {
-      players(slugs: $slugs) {
-        ... on Player {
-          anyCards(rarities: [limited, rare]) {
-            nodes {
+    # On construit une requête avec des ALIAS (p0, p1, etc.) pour contourner la restriction de liste
+    alias_queries = ""
+    for i, (name, slug) in enumerate(watchlist.items()):
+        alias_queries += f"""
+        p{i}: player(slug: "{slug}") {{
+          anyCards(rarities: [limited, rare]) {{
+            nodes {{
               rarityTyped
-              liveSingleSaleOffer {
-                receiverSide {
-                  wei
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    """
+              liveSingleSaleOffer {{
+                receiverSide {{ wei }}
+              }}
+            }}
+          }}
+        }}
+        """
+    
+    full_query = f"query GetWatchlist {{ {alias_queries} }}"
+    
     try:
-        # On passe le slug dans une liste : [slug]
-        res = requests.post(API_URL, json={'query': query, 'variables': {'slugs': [slug]}}, headers=headers).json()
-        st.session_state['last_debug'] = res 
-        
-        if "errors" in res: return None, None
-
-        players_list = res.get('data', {}).get('players', [])
-        if not players_list or not players_list[0]: return None, None
-        
-        # On extrait les données du premier (et seul) joueur trouvé
-        cards = players_list[0].get('anyCards', {}).get('nodes', [])
-        lim_prices, rare_prices = [], []
-        
-        for c in cards:
-            if not c: continue
-            offer = c.get('liveSingleSaleOffer')
-            if offer:
-                receiver = offer.get('receiverSide', {})
-                if receiver and receiver.get('wei'):
-                    val = float(receiver['wei']) / 1e18
-                    rarity = c.get('rarityTyped')
-                    if rarity:
-                        rarity_str = str(rarity).lower()
-                        if rarity_str == 'limited': lim_prices.append(val)
-                        elif rarity_str == 'rare': rare_prices.append(val)
-        
-        return (min(lim_prices) if lim_prices else None, min(rare_prices) if rare_prices else None)
-    except: return None, None
+        res = requests.post(API_URL, json={'query': full_query}, headers=headers).json()
+        st.session_state['last_debug'] = res
+        return res.get('data', {})
+    except:
+        return {}
 
 st.set_page_config(page_title="Sorare Arbitrage Tool", page_icon="🎯")
 st.title("🎯 Sorare Arbitrage Real-Time")
@@ -91,6 +67,7 @@ if 'final_token' not in st.session_state: st.session_state['final_token'] = None
 if 'otp_challenge' not in st.session_state: st.session_state['otp_challenge'] = None
 
 if not st.session_state['final_token']:
+    # --- FORMULAIRE DE CONNEXION ---
     if not st.session_state['otp_challenge']:
         with st.form("login"):
             st.subheader("🔑 Connexion")
@@ -108,44 +85,52 @@ if not st.session_state['final_token']:
                     elif data.get('jwtToken'):
                         st.session_state['final_token'] = data['jwtToken']['token']
                         st.rerun()
-                    else: st.error(f"Erreur API : {data.get('errors', [{}])[0].get('message', 'Erreur de connexion.')}")
-                else: st.error("Impossible de récupérer le sel du compte.")
+                    else: st.error("Erreur de connexion.")
+                else: st.error("Compte introuvable.")
     else:
         with st.form("otp"):
-            st.subheader("📱 Code 2FA")
-            otp_code = st.text_input("Saisir le code à 6 chiffres")
+            otp_code = st.text_input("Code 2FA")
             if st.form_submit_button("Valider"):
                 res = sorare_sign_in(st.session_state['temp_email'], otp_attempt=otp_code, otp_session_challenge=st.session_state['otp_challenge'])
                 if res.get('data', {}).get('signIn', {}).get('jwtToken'):
                     st.session_state['final_token'] = res['data']['signIn']['jwtToken']['token']
                     st.rerun()
-                else: st.error("Code incorrect.")
 
 else:
-    st.success("✅ Connecté au marché Sorare")
-    with st.sidebar:
-        st.write(f"Session active : {st.session_state.get('temp_email', 'Utilisateur')}")
-        if st.button("Se déconnecter"):
-            st.session_state['final_token'] = None
-            st.session_state['otp_challenge'] = None
-            st.rerun()
-    
-    st.subheader("🔍 Monitoring des opportunités")
+    # --- DASHBOARD ---
+    st.success("✅ Marché connecté")
     watchlist = {"Hervé Koffi": "kouakou-herve-koffi", "Jordan Lefort": "jordan-lefort"}
+    
+    all_data = get_all_market_data(watchlist, st.session_state['final_token'])
+    
+    for i, (name, slug) in enumerate(watchlist.items()):
+        player_data = all_data.get(f"p{i}")
+        lim_prices, rare_prices = [], []
+        
+        if player_data and player_data.get('anyCards'):
+            for c in player_data['anyCards'].get('nodes', []):
+                offer = c.get('liveSingleSaleOffer')
+                if offer and offer.get('receiverSide', {}).get('wei'):
+                    price = float(offer['receiverSide']['wei']) / 1e18
+                    rarity = str(c.get('rarityTyped')).lower()
+                    if rarity == 'limited': lim_prices.append(price)
+                    elif rarity == 'rare': rare_prices.append(price)
 
-    for name, slug in watchlist.items():
-        p_lim, p_rare = get_market_data(slug, st.session_state['final_token'])
         col1, col2, col3, col4 = st.columns([2, 1, 1, 2])
         col1.markdown(f"**{name}**")
         
-        if p_lim is not None and p_rare is not None:
-            ratio = p_rare / p_lim if p_lim > 0 else 0
+        p_lim = min(lim_prices) if lim_prices else None
+        p_rare = min(rare_prices) if rare_prices else None
+
+        if p_lim and p_rare:
+            ratio = p_rare / p_lim
             col2.write(f"L: {p_lim:.4f} Ξ")
             col3.write(f"R: {p_rare:.4f} Ξ")
-            if ratio > 0 and ratio < 4.0: col4.success(f"🔥 Ratio: {ratio:.2f} (BUY !)")
+            if ratio < 4.0: col4.success(f"🔥 Ratio: {ratio:.2f}")
             else: col4.info(f"⚖️ Ratio: {ratio:.2f}")
-        else: col4.warning("Aucun prix trouvé sur le marché.")
+        else:
+            col4.warning("Pas d'offres.")
         st.divider()
 
-    if st.checkbox("Afficher Debug JSON"):
+    if st.checkbox("Debug JSON"):
         st.json(st.session_state.get('last_debug', {}))
