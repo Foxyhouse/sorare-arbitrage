@@ -5,28 +5,57 @@ import pandas as pd
 import time
 from datetime import datetime
 
-# --- CONFIGURATION ---
+# --- RÉCUPÉRATION DES SECRETS ---
+# Streamlit va chercher ces variables dans l'onglet "Secrets" de ton dashboard
+try:
+    TELEGRAM_TOKEN = st.secrets["TELEGRAM_TOKEN"]
+    TELEGRAM_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
+    DEFAULT_EMAIL = st.secrets["SORARE_EMAIL"]
+    DEFAULT_PWD = st.secrets["SORARE_PASSWORD"]
+except Exception as e:
+    st.error("Erreur : Les secrets ne sont pas configurés dans Streamlit Cloud.")
+    st.stop()
+
 API_URL = "https://api.sorare.com/graphql"
 AUDIENCE = "sorare-app"
 CURRENT_SEASON_YEAR = 2026 
 
-# --- CONFIGURATION TELEGRAM ---
-TELEGRAM_TOKEN = "TON_TOKEN_ICI"
-TELEGRAM_CHAT_ID = "TON_CHAT_ID_ICI"
-
+# --- FONCTION ALERTE ---
 def send_telegram_alert(message):
-    url = f"https://api.telegram.org/bot8447447982:AAFVCd_yJsvHHC6Fl_5GYR75ziYVoEal3rw/sendMessage"
-    payload = {"chat_id": 5844984041, "text": message, "parse_mode": "Markdown"}
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
         requests.post(url, json=payload, timeout=5)
     except:
         pass
 
-# --- INITIALISATION MÉMOIRE ALERTES ---
+# --- INITIALISATION ---
 if 'sent_alerts' not in st.session_state:
     st.session_state['sent_alerts'] = set()
+if 'token' not in st.session_state:
+    st.session_state['token'] = None
 
-# --- LOGIQUE DE RÉCUPÉRATION DES FLOORS ---
+# --- FONCTIONS API ---
+def get_user_salt(email):
+    try:
+        res = requests.get(f"https://api.sorare.com/api/v1/users/{email}", timeout=5)
+        return res.json().get("salt") if res.status_code == 200 else None
+    except: return None
+
+def sorare_sign_in(email, hashed_password):
+    query = """
+    mutation SignInMutation($input: signInInput!) {
+      signIn(input: $input) {
+        jwtToken(aud: "sorare-app") { token }
+        errors { message }
+      }
+    }
+    """
+    try:
+        res = requests.post(API_URL, json={'query': query, 'variables': {"input": {"email": email, "password": hashed_password}}}, timeout=10).json()
+        return res.get('data', {}).get('signIn', {})
+    except: return {}
+
 def get_segmented_floors(player_slug, is_in_season, jwt_token):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE}
     query = """
@@ -42,31 +71,28 @@ def get_segmented_floors(player_slug, is_in_season, jwt_token):
     }
     """
     try:
-        res = requests.post(API_URL, json={'query': query, 'variables': {'slug': player_slug}}, headers=headers, timeout=10).json()
+        res = requests.post(API_URL, json={'query': query, 'variables': {'slug': player_slug}}, headers=headers).json()
         nodes = res.get('data', {}).get('tokens', {}).get('all_offers', {}).get('nodes', [])
         lim_prices, rare_prices = [], []
         for n in nodes:
             card = n['senderSide']['anyCards'][0]
-            card_is_in_season = (card.get('seasonYear') == CURRENT_SEASON_YEAR)
-            if card_is_in_season == is_in_season:
-                eur = n.get('receiverSide', {}).get('amounts', {}).get('eurCents')
+            if (card.get('seasonYear') == CURRENT_SEASON_YEAR) == is_in_season:
+                eur = n['receiverSide']['amounts']['eurCents']
                 if eur:
                     p = float(eur) / 100
                     if card['rarityTyped'] == 'limited': lim_prices.append(p)
                     if card['rarityTyped'] == 'rare': rare_prices.append(p)
-        return (min(lim_prices) if lim_prices else None), (min(rare_prices) if rare_prices else None)
+        return min(lim_prices) if lim_prices else None, min(rare_prices) if rare_prices else None
     except: return None, None
 
 def scan_and_alert(jwt_token):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE}
     query = """
-    query GetMarketFlux {
+    query GetFlux {
       tokens {
-        liveSingleSaleOffers(first: 80, sport: FOOTBALL) {
+        liveSingleSaleOffers(first: 100, sport: FOOTBALL) {
           nodes {
-            senderSide { 
-              anyCards { slug rarityTyped seasonYear anyPlayer { displayName slug } } 
-            }
+            senderSide { anyCards { slug rarityTyped seasonYear anyPlayer { displayName slug } } }
             receiverSide { amounts { eurCents } }
             startDate
           }
@@ -78,54 +104,57 @@ def scan_and_alert(jwt_token):
         res = requests.post(API_URL, json={'query': query}, headers=headers).json()
         nodes = res.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
         findings = []
-        
         for n in nodes:
-            eur_cents = n.get('receiverSide', {}).get('amounts', {}).get('eurCents')
+            eur = n.get('receiverSide', {}).get('amounts', {}).get('eurCents')
             cards = n.get('senderSide', {}).get('anyCards', [])
-            if eur_cents and cards and str(cards[0].get('rarityTyped')).lower() == 'rare':
+            if eur and cards and cards[0]['rarityTyped'] == 'rare':
                 card = cards[0]
-                is_in_season = (card.get('seasonYear') == CURRENT_SEASON_YEAR)
-                p_now = round(float(eur_cents) / 100, 2)
-                f_lim, f_rare = get_segmented_floors(card['anyPlayer']['slug'], is_in_season, jwt_token)
+                is_in = (card['seasonYear'] == CURRENT_SEASON_YEAR)
+                p_now = round(float(eur) / 100, 2)
+                f_lim, f_rare = get_segmented_floors(card['anyPlayer']['slug'], is_in, jwt_token)
                 
                 ratio = round(p_now / f_lim, 2) if f_lim else 99
-                card_id = card['slug'] # Identifiant unique de la mise en vente
-
-                # --- LOGIQUE D'ALERTE TELEGRAM ---
-                # On alerte si : Ratio < 3.5 ET pas encore envoyé
-                if ratio < 3.5 and card_id not in st.session_state['sent_alerts']:
-                    msg = (f"🚀 *PÉPITE DÉTECTÉE !*\n\n"
-                           f"👤 Joueur : {card['anyPlayer']['displayName']}\n"
-                           f"💰 Prix : {p_now}€ (Floor Rare: {f_rare}€)\n"
-                           f"📊 Ratio : {ratio}\n"
-                           f"🔗 [Acheter sur Sorare](https://sorare.com/football/cards/{card_id})")
+                
+                # Alerte Telegram
+                if ratio < 3.5 and card['slug'] not in st.session_state['sent_alerts']:
+                    msg = f"🚀 *PÉPITE !* {card['anyPlayer']['displayName']} à {p_now}€ (Ratio: {ratio})\n[Lien](https://sorare.com/football/cards/{card['slug']})"
                     send_telegram_alert(msg)
-                    st.session_state['sent_alerts'].add(card_id)
+                    st.session_state['sent_alerts'].add(card['slug'])
 
                 findings.append({
-                    "🛒": f"https://sorare.com/football/cards/{card_id}",
-                    "Vente": n.get('startDate'),
+                    "🛒": f"https://sorare.com/football/cards/{card['slug']}",
+                    "Vente": n['startDate'],
                     "Joueur": card['anyPlayer']['displayName'],
-                    "Saison": "🟢 In-Season" if is_in_season else "⚪ Classic",
-                    "Prix (€)": p_now,
-                    "Floor Rare (€)": f_rare,
+                    "Cat": "🟢 In" if is_in else "⚪ Cl",
+                    "Prix": p_now,
+                    "F.Rare": f_rare,
                     "Ratio": ratio
                 })
         return sorted(findings, key=lambda x: x['Vente'], reverse=True)
     except: return []
 
-# --- UI ---
-st.set_page_config(page_title="Sniper Telegram", layout="wide")
-st.title("🎯 Sniper Sorare + Alertes Telegram")
+# --- INTERFACE ---
+st.set_page_config(page_title="Sniper Pro", layout="wide")
 
-if st.session_state.get('token'):
-    st.sidebar.success("Bot Actif 🚀")
-    st.sidebar.write(f"Dernier scan : {datetime.now().strftime('%H:%M:%S')}")
-    
+if not st.session_state['token']:
+    if st.button("🚀 Initialiser la session Sorare"):
+        salt = get_user_salt(DEFAULT_EMAIL)
+        if salt:
+            hpwd = bcrypt.hashpw(DEFAULT_PWD.encode(), salt.encode()).decode()
+            res = sorare_sign_in(DEFAULT_EMAIL, hpwd)
+            if res.get('jwtToken'):
+                st.session_state['token'] = res['jwtToken']['token']
+                st.rerun()
+            else: st.error("Erreur de login (vérifie tes secrets ou OTP).")
+else:
+    st.sidebar.write(f"🔄 Auto-scan actif : {datetime.now().strftime('%H:%M:%S')}")
+    if st.sidebar.button("Déconnexion"):
+        st.session_state['token'] = None
+        st.rerun()
+
     data = scan_and_alert(st.session_state['token'])
     if data:
-        df = pd.DataFrame(data)
-        st.dataframe(df, column_config={"🛒": st.column_config.LinkColumn("🛒", display_text="Ouvrir")}, use_container_width=True)
+        st.dataframe(pd.DataFrame(data), column_config={"🛒": st.column_config.LinkColumn("🛒", display_text="Ouvrir")}, use_container_width=True, hide_index=True)
     
     time.sleep(60)
     st.rerun()
