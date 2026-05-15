@@ -110,3 +110,72 @@ if not st.session_state['final_token']:
             email = st.text_input("Email", value="jacques.troispoils@gmail.com")
             password = st.text_input("Mot de passe", type="password")
             if st.form_submit_button("Se connecter"):
+                salt = get_user_salt(email)
+                if salt:
+                    hashed_pw = bcrypt.hashpw(password.encode('utf-8'), salt.encode('utf-8')).decode('utf-8')
+                    res = sorare_sign_in(email, hashed_password=hashed_pw)
+                    data = res.get('data', {}).get('signIn', {})
+                    
+                    if data.get('otpSessionChallenge'):
+                        st.session_state['otp_challenge'] = data['otpSessionChallenge']
+                        st.session_state['temp_email'] = email
+                        st.rerun()
+                    elif data.get('jwtToken'):
+                        st.session_state['final_token'] = data['jwtToken']['token']
+                        st.rerun()
+                    else:
+                        msg = data.get('errors', [{}])[0].get('message', "Erreur de connexion.")
+                        st.error(f"Erreur API : {msg}")
+                else:
+                    st.error("Impossible de récupérer le sel du compte.")
+    else:
+        with st.form("otp"):
+            st.subheader("📱 Code 2FA")
+            otp_code = st.text_input("Saisir le code à 6 chiffres")
+            if st.form_submit_button("Valider"):
+                res = sorare_sign_in(st.session_state['temp_email'], otp_attempt=otp_code, otp_session_challenge=st.session_state['otp_challenge'])
+                data = res.get('data', {}).get('signIn', {})
+                if data.get('jwtToken'):
+                    st.session_state['final_token'] = data['jwtToken']['token']
+                    st.rerun()
+                else:
+                    st.error("Code incorrect.")
+
+else:
+    st.success("✅ Connecté au marché Sorare")
+    
+    with st.sidebar:
+        st.write(f"Session active : {st.session_state.get('temp_email', 'Utilisateur')}")
+        if st.button("Se déconnecter"):
+            st.session_state['final_token'] = None
+            st.session_state['otp_challenge'] = None
+            st.rerun()
+    
+    st.subheader("🔍 Monitoring des opportunités")
+    
+    watchlist = {
+        "Hervé Koffi": "kouakou-herve-koffi",
+        "Jordan Lefort": "jordan-lefort"
+    }
+
+    for name, slug in watchlist.items():
+        p_lim, p_rare = get_market_data(slug, st.session_state['final_token'])
+        
+        col1, col2, col3, col4 = st.columns([2, 1, 1, 2])
+        col1.markdown(f"**{name}**")
+        
+        if p_lim and p_rare:
+            ratio = p_rare / p_lim
+            col2.write(f"L: {p_lim}€")
+            col3.write(f"R: {p_rare}€")
+            
+            if ratio < 4.0:
+                col4.success(f"🔥 Ratio: {ratio:.2f} (BUY !)")
+            else:
+                col4.info(f"⚖️ Ratio: {ratio:.2f}")
+        else:
+            col4.warning("Aucun prix trouvé sur le marché.")
+        st.divider()
+
+    if st.checkbox("Afficher Debug JSON"):
+        st.json(st.session_state.get('last_debug', {}))
