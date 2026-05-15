@@ -40,11 +40,11 @@ def get_segmented_floors(player_slug, is_in_season, jwt_token):
 
 def scan_arbitrage_sniper(jwt_token):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE}
-    # On agrandit la fenêtre à 150 items
+    # On agrandit la fenêtre à 350 items
     query = """
     query GetMarketFlux {
       tokens {
-        liveSingleSaleOffers(first: 150, sport: FOOTBALL) {
+        liveSingleSaleOffers(first: 350, sport: FOOTBALL) {
           nodes {
             senderSide { 
               anyCards { rarityTyped seasonYear anyPlayer { displayName slug } } 
@@ -76,7 +76,7 @@ def scan_arbitrage_sniper(jwt_token):
                 # --- FILTRE DE PERTINENCE ---
                 # On ne garde que si c'est un undercut OU un bon ratio
                 is_undercut = f_rare and price_now <= f_rare
-                is_good_ratio = ratio and ratio < 4.5
+                is_good_ratio = ratio and ratio < 6.5
                 
                 if is_undercut or is_good_ratio:
                     findings.append({
