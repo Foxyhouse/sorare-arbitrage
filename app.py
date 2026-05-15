@@ -37,7 +37,7 @@ def get_market_data(slug, jwt_token):
     
     query = """
     query GetFloor($slugs: [String!]) {
-      anyCards(playerSlugs: $slugs, rarities: [limited, rare]) {
+      anyCards(slugs: $slugs, rarities: [limited, rare]) {
         ... on Card {
           rarity
           liveSingleSaleOffer {
