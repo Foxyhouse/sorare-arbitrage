@@ -100,7 +100,7 @@ def scan_flux(jwt_token):
             floor = get_floor(player.get('slug'), is_in, jwt_token, p_now)
             if floor and floor >= 1.10:
                 discount = round(((floor - p_now) / floor) * 100, 1)
-                if discount > 0:
+                if discount > -100:
                     findings.append({
                         "🛒": f"https://sorare.com/football/cards/{cards[0]['slug']}",
                         "Âge": f"{age} min",
