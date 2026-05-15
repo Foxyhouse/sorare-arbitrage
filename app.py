@@ -38,7 +38,7 @@ def sorare_sign_in(email, hashed_password=None, otp_attempt=None, otp_session_ch
     except Exception as e:
         return {"errors": [{"message": str(e)}]}
 
-# --- LOGIQUE DE MARCHÉ ---
+# --- LOGIQUE DE MARCHÉ (VERSION FINALE SCHEMA 2026) ---
 def get_market_data(slug, jwt_token):
     headers = {
         "Authorization": f"Bearer {jwt_token}",
@@ -46,14 +46,16 @@ def get_market_data(slug, jwt_token):
         "Content-Type": "application/json"
     }
     
-    # Stratégie 2026 : On interroge les offres de vente actives pour le joueur
+    # Structure validée : liveSingleSaleOffers -> tokens -> rarityTyped
     query = """
     query GetFloor($slug: String!) {
       tokens {
         liveSingleSaleOffers(playerSlug: $slug) {
           nodes {
-            anyCards {
-              rarityTyped
+            tokens {
+              ... on Card {
+                rarityTyped
+              }
             }
             receiverSide {
               amounts {
@@ -73,20 +75,20 @@ def get_market_data(slug, jwt_token):
         if "errors" in res:
             return None, None
 
-        # Extraction selon : tokens -> liveSingleSaleOffers -> nodes
         offers = res.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
         
         lim_prices, rare_prices = [], []
         
         for offer in offers:
-            # On récupère la rareté via la première carte de l'offre
-            cards = offer.get('anyCards', [])
-            if not cards:
+            # On cherche la rareté dans la liste des tokens de l'offre
+            offer_tokens = offer.get('tokens', [])
+            if not offer_tokens:
                 continue
             
-            rarity = str(cards[0].get('rarityTyped', '')).lower()
+            # Extraction de la rareté du premier token (Card)
+            rarity = str(offer_tokens[0].get('rarityTyped', '')).lower()
             
-            # On récupère le prix dans receiverSide -> amounts -> wei
+            # Extraction du prix en Wei
             wei_val = offer.get('receiverSide', {}).get('amounts', {}).get('wei')
             
             if wei_val:
@@ -96,26 +98,28 @@ def get_market_data(slug, jwt_token):
                 elif rarity == 'rare':
                     rare_prices.append(price_eth)
         
+        # On calcule le prix plancher pour chaque rareté
         p_lim = min(lim_prices) if lim_prices else None
         p_rare = min(rare_prices) if rare_prices else None
         return p_lim, p_rare
-    except:
+    except Exception as e:
+        st.error(f"Erreur technique : {e}")
         return None, None
 
-# --- INTERFACE STREAMLIT ---
+# --- INTERFACE UTILISATEUR STREAMLIT ---
 st.set_page_config(page_title="Arbitrage Sorare 2026", page_icon="🎯", layout="wide")
-st.title("🎯 Arbitrage Limited / Rare en Temps Réel")
+st.title("🎯 Sorare Arbitrage Real-Time")
 
 if 'token' not in st.session_state: st.session_state['token'] = None
 if 'otp' not in st.session_state: st.session_state['otp'] = None
 
-# 1. Gestion de la Connexion
+# ÉTAPE 1 : CONNEXION
 if not st.session_state['token']:
     col_log, _ = st.columns([1, 2])
     with col_log:
         if not st.session_state['otp']:
-            with st.form("login"):
-                st.subheader("🔑 Connexion")
+            with st.form("login_form"):
+                st.subheader("🔐 Accès Marché")
                 email = st.text_input("Email", value="jacques.troispoils@gmail.com")
                 pwd = st.text_input("Mot de passe", type="password")
                 if st.form_submit_button("Se connecter"):
@@ -132,58 +136,59 @@ if not st.session_state['token']:
                             st.session_state['token'] = data['jwtToken']['token']
                             st.rerun()
                         else:
-                            st.error("Identifiants incorrects.")
+                            st.error("Erreur d'identifiants.")
                     else:
                         st.error("Compte introuvable.")
         else:
-            with st.form("2fa"):
+            with st.form("otp_form"):
                 st.subheader("📱 Code 2FA")
-                code = st.text_input("Saisir le code")
+                code = st.text_input("Saisir le code de sécurité")
                 if st.form_submit_button("Valider"):
                     res = sorare_sign_in(st.session_state['mail'], otp_attempt=code, otp_session_challenge=st.session_state['otp'])
                     if res.get('data', {}).get('signIn', {}).get('jwtToken'):
                         st.session_state['token'] = res['data']['signIn']['jwtToken']['token']
                         st.rerun()
                     else:
-                        st.error("Code erroné.")
+                        st.error("Code 2FA incorrect.")
 
-# 2. Affichage du Dashboard
+# ÉTAPE 2 : DASHBOARD ARBITRAGE
 else:
-    st.sidebar.success("✅ Connecté")
-    if st.sidebar.button("Déconnexion"):
+    st.sidebar.success("✅ Session active")
+    if st.sidebar.button("Se déconnecter"):
         st.session_state['token'] = None
         st.session_state['otp'] = None
         st.rerun()
 
+    # Liste des joueurs à surveiller (Slug à vérifier sur Sorare.com)
     watchlist = {
         "Hervé Koffi": "kouakou-herve-koffi",
         "Jordan Lefort": "jordan-lefort",
         "Lucas Chevalier": "lucas-chevalier"
     }
 
-    st.subheader("📊 Comparaison Limited vs Rare")
+    st.subheader("🚀 Analyse des opportunités")
     
     for name, slug in watchlist.items():
-        p_lim, p_rare = get_market_data(slug, st.session_state['token'])
-        
         with st.container():
+            p_lim, p_rare = get_market_data(slug, st.session_state['token'])
+            
             c1, c2, c3, c4 = st.columns([2, 1, 1, 2])
             c1.markdown(f"### {name}")
             
             if p_lim: c2.metric("Floor Limited", f"{p_lim:.4f} Ξ")
-            else: c2.caption("Pas d'offre Limited")
+            else: c2.caption("Aucune Limited")
             
             if p_rare: c3.metric("Floor Rare", f"{p_rare:.4f} Ξ")
-            else: c3.caption("Pas d'offre Rare")
+            else: c3.caption("Aucune Rare")
 
             if p_lim and p_rare:
                 ratio = p_rare / p_lim
                 if ratio < 4.0:
-                    c4.success(f"🔥 OPPORTUNITÉ\\nRatio: {ratio:.2f}")
+                    c4.success(f"🔥 OPPORTUNITÉ !\\nRatio : {ratio:.2f}")
                 else:
-                    c4.info(f"Ratio: {ratio:.2f}")
+                    c4.info(f"Ratio : {ratio:.2f}")
             
             st.divider()
 
-    if st.checkbox("🔍 Debug JSON (Dernière réponse API)"):
+    if st.checkbox("🔍 Debug JSON"):
         st.json(st.session_state.get('last_debug', {}))
