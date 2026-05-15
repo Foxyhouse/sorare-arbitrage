@@ -35,14 +35,16 @@ def get_market_data(slug, jwt_token):
         "Content-Type": "application/json"
     }
     
-    # Utilisation de cardSet au lieu de cards
+    # Structure CardSetRoot -> cards -> nodes
     query = """
     query GetFloor($slug: String!) {
       cardSet(playerSlugs: [$slug], rarities: [limited, rare]) {
-        nodes {
-          rarity
-          liveSingleSaleOffer {
-            receiverSide { wei }
+        cards {
+          nodes {
+            rarity
+            liveSingleSaleOffer {
+              receiverSide { wei }
+            }
           }
         }
       }
@@ -54,7 +56,10 @@ def get_market_data(slug, jwt_token):
         
         if "errors" in res: return None, None
 
-        nodes = res.get('data', {}).get('cardSet', {}).get('nodes', [])
+        # On descend d'un étage supplémentaire : cardSet -> cards -> nodes
+        card_set = res.get('data', {}).get('cardSet', {})
+        nodes = card_set.get('cards', {}).get('nodes', [])
+        
         lim_prices, rare_prices = [], []
         
         for n in nodes:
@@ -68,7 +73,7 @@ def get_market_data(slug, jwt_token):
         return (min(lim_prices) if lim_prices else None, min(rare_prices) if rare_prices else None)
     except: return None, None
 
-# --- UI Streamlit ---
+# --- UI ---
 st.set_page_config(page_title="Sorare Arbitrage Tool", page_icon="🎯")
 st.title("🎯 Sorare Arbitrage Real-Time")
 
@@ -102,7 +107,7 @@ if not st.session_state['final_token']:
                     st.session_state['final_token'] = res['data']['signIn']['jwtToken']['token']
                     st.rerun()
 else:
-    st.success("✅ Marché connecté (Point d'entrée : cardSet)")
+    st.success("✅ Connexion établie")
     watchlist = {"Hervé Koffi": "kouakou-herve-koffi", "Jordan Lefort": "jordan-lefort"}
 
     for name, slug in watchlist.items():
@@ -116,7 +121,7 @@ else:
             col3.write(f"R: {p_rare:.4f} Ξ")
             if ratio < 4.0: col4.success(f"🔥 Ratio: {ratio:.2f}")
             else: col4.info(f"⚖️ Ratio: {ratio:.2f}")
-        else: col4.warning("Pas d'offres trouvées.")
+        else: col4.warning("Recherche d'offres en cours...")
         st.divider()
 
     if st.checkbox("Debug JSON"):
