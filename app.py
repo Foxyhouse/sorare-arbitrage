@@ -4,31 +4,19 @@ import bcrypt
 import pandas as pd
 from datetime import datetime, timedelta
 
-# --- CONFIGURATION API ---
+# --- CONFIGURATION ---
 API_URL = "https://api.sorare.com/graphql"
 AUDIENCE = "sorare-app"
 
-# --- LOGIQUE DE RÉCUPÉRATION DES FLOORS PAR SEGMENT ---
-def get_segmented_floors(player_slug, is_in_season, jwt_token):
+# --- RÉCUPÉRATION FLOORS ---
+def get_segmented_floors(player_slug, season_name, jwt_token):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE}
-    
-    # En 2026, on filtre par date de saison ou tag spécifique
-    # Pour l'exemple, on considère que In-Season = Saison 2025-2026
-    # On adapte la requête pour demander les floors du même segment que l'annonce
-    season_filter = '["2025-2026"]' if is_in_season else '[]' # Filtre simplifié
-    
     query = """
-    query GetSegmentedFloors($slug: String!) {
+    query GetSegFloors($slug: String!) {
       tokens {
-        limited: liveSingleSaleOffers(playerSlug: $slug, rarities: [limited], first: 10) {
+        all_offers: liveSingleSaleOffers(playerSlug: $slug, first: 30) {
           nodes { 
-            senderSide { anyCards { season { name } } }
-            receiverSide { amounts { eurCents } } 
-          }
-        }
-        rare: liveSingleSaleOffers(playerSlug: $slug, rarities: [rare], first: 10) {
-          nodes { 
-            senderSide { anyCards { season { name } } }
+            senderSide { anyCards { rarityTyped season { name } } }
             receiverSide { amounts { eurCents } } 
           }
         }
@@ -36,41 +24,35 @@ def get_segmented_floors(player_slug, is_in_season, jwt_token):
     }
     """
     try:
-        res = requests.post(API_URL, json={'query': query, 'variables': {'slug': player_slug}}, headers=headers).json()
-        data = res.get('data', {}).get('tokens', {})
-        current_s = "2025-2026"
-
-        def find_min(nodes, in_season_req):
-            prices = []
-            for n in nodes:
-                s_name = n['senderSide']['anyCards'][0]['season']['name']
-                match = (current_s in s_name) if in_season_req else (current_s not in s_name)
-                if match and n.get('receiverSide', {}).get('amounts', {}).get('eurCents'):
-                    prices.append(float(n['receiverSide']['amounts']['eurCents'])/100)
-            return min(prices) if prices else None
-
-        f_lim = find_min(data.get('limited', {}).get('nodes', []), is_in_season)
-        f_rare = find_min(data.get('rare', {}).get('nodes', []), is_in_season)
+        res = requests.post(API_URL, json={'query': query, 'variables': {'slug': player_slug}}, headers=headers, timeout=10).json()
+        nodes = res.get('data', {}).get('tokens', {}).get('all_offers', {}).get('nodes', [])
         
-        return f_lim, f_rare
+        lim_prices = []
+        rare_prices = []
+        
+        for n in nodes:
+            card = n['senderSide']['anyCards'][0]
+            # On ne compare qu'avec la MÊME saison
+            if card['season']['name'] == season_name:
+                price = float(n['receiverSide']['amounts']['eurCents']) / 100
+                if card['rarityTyped'] == 'limited': lim_prices.append(price)
+                if card['rarityTyped'] == 'rare': rare_prices.append(price)
+        
+        return min(lim_prices) if lim_prices else None, min(rare_prices) if rare_prices else None
     except:
         return None, None
 
-def scan_arbitrage_segmented(jwt_token):
+def scan_arbitrage_v3(jwt_token):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE}
-    since_date = (datetime.now() - timedelta(hours=24)).isoformat() + "Z"
+    since = (datetime.now() - timedelta(hours=24)).isoformat() + "Z"
     
     query = """
     query GetFlux($since: ISO8601DateTime) {
       tokens {
-        liveSingleSaleOffers(first: 30, sport: FOOTBALL, updatedAfter: $since) {
+        liveSingleSaleOffers(first: 40, sport: FOOTBALL, updatedAfter: $since) {
           nodes {
             senderSide { 
-              anyCards { 
-                rarityTyped 
-                season { name }
-                anyPlayer { displayName slug } 
-              } 
+              anyCards { rarityTyped season { name } anyPlayer { displayName slug } } 
             }
             receiverSide { amounts { eurCents } }
             startDate
@@ -80,10 +62,14 @@ def scan_arbitrage_segmented(jwt_token):
     }
     """
     try:
-        res = requests.post(API_URL, json={'query': query, 'variables': {'since': since_date}}, headers=headers).json()
+        res = requests.post(API_URL, json={'query': query, 'variables': {'since': since}}, headers=headers, timeout=15).json()
         nodes = res.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
+        
+        if not nodes:
+            return [], "Aucune offre trouvée dans le flux 24h."
+
+        current_season = "2025-2026" # On garde ce repère mais on affiche le nom réel
         findings = []
-        current_season = "2025-2026"
         
         for n in nodes:
             eur_cents = n.get('receiverSide', {}).get('amounts', {}).get('eurCents')
@@ -91,53 +77,55 @@ def scan_arbitrage_segmented(jwt_token):
             
             if eur_cents and cards and str(cards[0].get('rarityTyped')).lower() == 'rare':
                 card = cards[0]
-                s_name = card.get('season', {}).get('name', "")
-                is_in_season = current_season in s_name
+                s_name = card.get('season', {}).get('name', "Inconnue")
                 
-                player_slug = card.get('anyPlayer', {}).get('slug')
-                price_listing = float(eur_cents) / 100
+                # Récupération des floors pour CETTE saison spécifique
+                f_lim, f_rare = get_segmented_floors(card['anyPlayer']['slug'], s_name, jwt_token)
                 
-                # On récupère les floors DU MÊME TYPE (In ou Classic)
-                f_lim, f_rare = get_segmented_floors(player_slug, is_in_season, jwt_token)
-                
-                ratio = round(price_listing / f_lim, 2) if f_lim else None
+                price_now = float(eur_cents) / 100
+                ratio = round(price_now / f_lim, 2) if f_lim else None
                 
                 findings.append({
                     "Vente": datetime.fromisoformat(n.get('startDate').replace('Z', '+00:00')).strftime("%H:%M"),
-                    "Joueur": card.get('anyPlayer', {}).get('displayName'),
-                    "Saison": "In-Season" if is_in_season else "Classic",
-                    "Prix Annonce (€)": price_listing,
-                    "Floor Rare Segment (€)": f_rare,
-                    "Floor Lim Segment (€)": f_lim,
+                    "Joueur": card['anyPlayer']['displayName'],
+                    "Saison": s_name,
+                    "Type": "🟢 In-Season" if current_season in s_name else "⚪ Classic",
+                    "Prix (€)": price_now,
+                    "Floor Rare (€)": f_rare,
+                    "Floor Lim (€)": f_lim,
                     "Ratio": ratio,
-                    "Slug": player_slug
+                    "Slug": card['anyPlayer']['slug']
                 })
-        return findings
-    except:
-        return []
+        return findings, None
+    except Exception as e:
+        return [], f"Erreur : {str(e)}"
 
-# --- UI ---
-st.set_page_config(page_title="Arbitrage Segmente", layout="wide")
+# --- INTERFACE ---
+st.set_page_config(page_title="Arbitrage V3", layout="wide")
 st.title("🎯 Arbitrage Cible : In-Season vs Classic")
 
 if st.session_state.get('token'):
-    if st.button("🔄 Rafraîchir le Scan"): st.rerun()
+    if st.sidebar.button("🔄 Rafraîchir"): st.rerun()
 
-    results = scan_arbitrage_segmented(st.session_state['token'])
+    # Utilisation d'un container pour éviter le blocage visuel
+    with st.spinner("Analyse du flux..."):
+        results, err = scan_arbitrage_v3(st.session_state['token'])
     
-    if results:
+    if err:
+        st.error(err)
+    elif results:
         df = pd.DataFrame(results).drop(columns=['Slug'])
         
-        def apply_styles(row):
+        def style_row(row):
             styles = [''] * len(row)
-            # Alerte si prix annoncé < floor rare actuel de son segment
-            if row['Floor Rare Segment (€)'] and row['Prix Annonce (€)'] < row['Floor Rare Segment (€)']:
-                styles[3] = 'background-color: #fff3cd; color: #856404; font-weight: bold'
-            # Alerte ratio
+            # Vert si ratio < 4
             if row['Ratio'] and float(row['Ratio']) < 4.0:
-                styles[6] = 'background-color: #d4edda; color: #155724; font-weight: bold'
+                styles[7] = 'background-color: #d4edda; color: #155724; font-weight: bold'
+            # Jaune si l'annonce est MOINS CHÈRE que le floor rare connu
+            if row['Floor Rare (€)'] and row['Prix (€)'] < row['Floor Rare (€)']:
+                styles[4] = 'background-color: #fff3cd; color: #856404;'
             return styles
 
-        st.dataframe(df.style.apply(apply_styles, axis=1), use_container_width=True)
+        st.dataframe(df.style.apply(style_row, axis=1), use_container_width=True)
     else:
-        st.info("Scan en cours...")
+        st.warning("Aucune carte Rare trouvée dans les dernières annonces. Réessaie.")
