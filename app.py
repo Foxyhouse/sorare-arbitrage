@@ -35,15 +35,16 @@ def get_market_data(slug, jwt_token):
         "Content-Type": "application/json"
     }
     
-    # Utilisation du champ 'tokenPrices' suggéré par l'API
     query = """
     query GetFloor($slugs: [String!]) {
       players(slugs: $slugs) {
         ... on Player {
           tokenPrices {
-            rarity
-            amount {
-              wei
+            nodes {
+              rarity
+              amount {
+                wei
+              }
             }
           }
         }
@@ -59,8 +60,7 @@ def get_market_data(slug, jwt_token):
         players = res.get('data', {}).get('players', [])
         if not players or not players[0]: return None, None
         
-        # Extraction depuis la liste 'tokenPrices'
-        token_prices = players[0].get('tokenPrices', [])
+        token_prices = players[0].get('tokenPrices', {}).get('nodes', [])
         lim_prices, rare_prices = [], []
         
         for tp in token_prices:
