@@ -44,7 +44,7 @@ def scan_arbitrage_sniper(jwt_token):
     query = """
     query GetMarketFlux {
       tokens {
-        liveSingleSaleOffers(first: 1350, sport: FOOTBALL) {
+        liveSingleSaleOffers(first: 13500, sport: FOOTBALL) {
           nodes {
             senderSide { 
               anyCards { rarityTyped seasonYear anyPlayer { displayName slug } } 
