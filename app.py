@@ -5,7 +5,7 @@ import pandas as pd
 # --- CONFIGURATION ---
 API_URL = "https://api.sorare.com/graphql"
 AUDIENCE = "sorare-app"
-CURRENT_SEASON_YEAR = 2026 # La seule info qui compte pour définir le "In-Season"
+CURRENT_SEASON_YEAR = 2026 
 
 def get_segmented_floors(player_slug, is_in_season, jwt_token):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE}
@@ -26,10 +26,8 @@ def get_segmented_floors(player_slug, is_in_season, jwt_token):
         nodes = res.get('data', {}).get('tokens', {}).get('all_offers', {}).get('nodes', [])
         
         lim_prices, rare_prices = [], []
-        
         for n in nodes:
             card = n['senderSide']['anyCards'][0]
-            # On vérifie si la carte du floor appartient au même groupe (In-Season ou Classic)
             card_is_in_season = (card.get('seasonYear') == CURRENT_SEASON_YEAR)
             
             if card_is_in_season == is_in_season:
@@ -45,10 +43,11 @@ def get_segmented_floors(player_slug, is_in_season, jwt_token):
 
 def scan_arbitrage_final(jwt_token):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE}
+    # Augmentation du scan à 150 pour trouver plus de Rares
     query = """
     query GetMarketFlux {
       tokens {
-        liveSingleSaleOffers(first: 80, sport: FOOTBALL) {
+        liveSingleSaleOffers(first: 150, sport: FOOTBALL) {
           nodes {
             senderSide { 
               anyCards { rarityTyped seasonYear anyPlayer { displayName slug } } 
@@ -71,26 +70,27 @@ def scan_arbitrage_final(jwt_token):
             
             if eur_cents and cards and str(cards[0].get('rarityTyped')).lower() == 'rare':
                 card = cards[0]
-                # Logique binaire : In-Season ou Classic
                 is_in_season = (card.get('seasonYear') == CURRENT_SEASON_YEAR)
                 label = "🟢 In-Season" if is_in_season else "⚪ Classic"
                 
-                # On cherche les floors dans la MÊME catégorie
                 f_lim, f_rare = get_segmented_floors(card['anyPlayer']['slug'], is_in_season, jwt_token)
                 
                 price_now = float(eur_cents) / 100
-                ratio = round(price_now / f_lim, 2) if f_lim else None
                 
-                findings.append({
-                    "Vente": n.get('startDate'),
-                    "Joueur": card['anyPlayer']['displayName'],
-                    "Catégorie": label,
-                    "Prix (€)": price_now,
-                    "Floor Rare (€)": f_rare,
-                    "Floor Lim (€)": f_lim,
-                    "Ratio": ratio,
-                    "Slug": card['anyPlayer']['slug']
-                })
+                # --- FILTRE : Uniquement si prix <= Floor Rare ---
+                if f_rare is not None and price_now <= f_rare:
+                    ratio = round(price_now / f_lim, 2) if f_lim else None
+                    
+                    findings.append({
+                        "Vente": n.get('startDate'),
+                        "Joueur": card['anyPlayer']['displayName'],
+                        "Catégorie": label,
+                        "Prix (€)": round(price_now, 2),
+                        "Floor Rare (€)": round(f_rare, 2),
+                        "Floor Lim (€)": round(f_lim, 2) if f_lim else None,
+                        "Ratio": ratio,
+                        "Slug": card['anyPlayer']['slug']
+                    })
         
         return sorted(findings, key=lambda x: x['Vente'], reverse=True)
     except Exception as e:
@@ -98,22 +98,24 @@ def scan_arbitrage_final(jwt_token):
         return []
 
 # --- UI ---
-st.title("🎯 Arbitrage : In-Season vs Classic")
+st.title("🎯 Sniper Arbitrage : Undercuts uniquement")
 
 if st.session_state.get('token'):
-    if st.button("🚀 Lancer le Scan"):
+    if st.button("🚀 Lancer le Scan Profond"):
         data = scan_arbitrage_final(st.session_state['token'])
         if data:
             df = pd.DataFrame(data).drop(columns=['Slug'])
             
             def style_df(row):
                 styles = [''] * len(row)
+                # Vert si ratio intéressant
                 if row['Ratio'] and float(row['Ratio']) < 4.0:
                     styles[6] = 'background-color: #d4edda; color: #155724; font-weight: bold'
-                if row['Floor Rare (€)'] and row['Prix (€)'] < row['Floor Rare (€)']:
-                    styles[3] = 'background-color: #fff3cd; color: #856404;'
+                # Jaune/Orange si c'est un undercut parfait (Prix <= Floor)
+                if row['Prix (€)'] <= row['Floor Rare (€)']:
+                    styles[3] = 'background-color: #fff3cd; color: #856404; border: 1px solid orange;'
                 return styles
 
             st.dataframe(df.style.apply(style_df, axis=1), use_container_width=True)
         else:
-            st.warning("Aucune Rare détectée.")
+            st.warning("Aucune opportunité (Prix au floor) détectée sur les 150 dernières offres.")
