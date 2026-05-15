@@ -5,7 +5,6 @@ import bcrypt
 API_URL = "https://api.sorare.com/graphql"
 AUDIENCE = "sorare-app"
 
-# --- 1. AUTHENTIFICATION ---
 def get_user_salt(email):
     try:
         res = requests.get(f"https://api.sorare.com/api/v1/users/{email}")
@@ -29,7 +28,6 @@ def sorare_sign_in(email, hashed_password=None, otp_attempt=None, otp_session_ch
         return requests.post(API_URL, json={'query': query, 'variables': {"input": input_data}}, headers=headers).json()
     except Exception as e: return {"errors": [{"message": str(e)}]}
 
-# --- 2. RÉCUPÉRATION DES PRIX ---
 def get_market_data(slug, jwt_token):
     headers = {
         "Authorization": f"Bearer {jwt_token}",
@@ -37,7 +35,6 @@ def get_market_data(slug, jwt_token):
         "Content-Type": "application/json"
     }
     
-    # LA REQUÊTE : Le prix se trouve dans le "receiverSide" de l'offre
     query = """
     query GetFloor($slugs: [String!]) {
       anyCards(playerSlugs: $slugs, rarities: [limited, rare]) {
@@ -45,7 +42,9 @@ def get_market_data(slug, jwt_token):
           rarity
           liveSingleSaleOffer {
             receiverSide {
-              amounts { eur }
+              amounts {
+                amount
+              }
             }
           }
         }
@@ -66,18 +65,24 @@ def get_market_data(slug, jwt_token):
             
             offer = c.get('liveSingleSaleOffer')
             if offer:
-                # Extraction du prix depuis receiverSide -> amounts -> eur
-                amounts = offer.get('receiverSide', {}).get('amounts', {})
-                if amounts and amounts.get('eur'):
-                    val = float(amounts['eur'])
-                    rarity = c.get('rarity')
-                    if rarity == 'limited': lim_prices.append(val)
-                    elif rarity == 'rare': rare_prices.append(val)
+                amounts = offer.get('receiverSide', {}).get('amounts')
+                if amounts:
+                    if isinstance(amounts, list) and len(amounts) > 0:
+                        val_str = amounts[0].get('amount')
+                    elif isinstance(amounts, dict):
+                        val_str = amounts.get('amount')
+                    else:
+                        val_str = None
+                        
+                    if val_str is not None:
+                        val = float(val_str)
+                        rarity = c.get('rarity')
+                        if rarity == 'limited': lim_prices.append(val)
+                        elif rarity == 'rare': rare_prices.append(val)
         
         return (min(lim_prices) if lim_prices else None, min(rare_prices) if rare_prices else None)
     except: return None, None
 
-# --- 3. INTERFACE UTILISATEUR ---
 st.set_page_config(page_title="Sorare Arbitrage Tool", page_icon="🎯")
 st.title("🎯 Sorare Arbitrage Real-Time")
 
@@ -132,11 +137,11 @@ else:
         col1, col2, col3, col4 = st.columns([2, 1, 1, 2])
         col1.markdown(f"**{name}**")
         
-        if p_lim and p_rare:
-            ratio = p_rare / p_lim
-            col2.write(f"L: {p_lim}€")
-            col3.write(f"R: {p_rare}€")
-            if ratio < 4.0: col4.success(f"🔥 Ratio: {ratio:.2f} (BUY !)")
+        if p_lim is not None and p_rare is not None:
+            ratio = p_rare / p_lim if p_lim > 0 else 0
+            col2.write(f"L: {p_lim}")
+            col3.write(f"R: {p_rare}")
+            if ratio > 0 and ratio < 4.0: col4.success(f"🔥 Ratio: {ratio:.2f} (BUY !)")
             else: col4.info(f"⚖️ Ratio: {ratio:.2f}")
         else: col4.warning("Aucun prix trouvé sur le marché.")
         st.divider()
