@@ -35,10 +35,10 @@ def get_market_data(slug, jwt_token):
         "Content-Type": "application/json"
     }
     
-    # NOUVELLE STRATÉGIE : On cherche dans le marché global par playerSlugs
+    # Utilisation de cardSet au lieu de cards
     query = """
     query GetFloor($slug: String!) {
-      cards(playerSlugs: [$slug], rarities: [limited, rare]) {
+      cardSet(playerSlugs: [$slug], rarities: [limited, rare]) {
         nodes {
           rarity
           liveSingleSaleOffer {
@@ -54,7 +54,7 @@ def get_market_data(slug, jwt_token):
         
         if "errors" in res: return None, None
 
-        nodes = res.get('data', {}).get('cards', {}).get('nodes', [])
+        nodes = res.get('data', {}).get('cardSet', {}).get('nodes', [])
         lim_prices, rare_prices = [], []
         
         for n in nodes:
@@ -68,7 +68,7 @@ def get_market_data(slug, jwt_token):
         return (min(lim_prices) if lim_prices else None, min(rare_prices) if rare_prices else None)
     except: return None, None
 
-# --- INTERFACE ---
+# --- UI Streamlit ---
 st.set_page_config(page_title="Sorare Arbitrage Tool", page_icon="🎯")
 st.title("🎯 Sorare Arbitrage Real-Time")
 
@@ -102,7 +102,7 @@ if not st.session_state['final_token']:
                     st.session_state['final_token'] = res['data']['signIn']['jwtToken']['token']
                     st.rerun()
 else:
-    st.success("✅ Marché connecté")
+    st.success("✅ Marché connecté (Point d'entrée : cardSet)")
     watchlist = {"Hervé Koffi": "kouakou-herve-koffi", "Jordan Lefort": "jordan-lefort"}
 
     for name, slug in watchlist.items():
@@ -116,7 +116,7 @@ else:
             col3.write(f"R: {p_rare:.4f} Ξ")
             if ratio < 4.0: col4.success(f"🔥 Ratio: {ratio:.2f}")
             else: col4.info(f"⚖️ Ratio: {ratio:.2f}")
-        else: col4.warning("Pas d'offres.")
+        else: col4.warning("Pas d'offres trouvées.")
         st.divider()
 
     if st.checkbox("Debug JSON"):
