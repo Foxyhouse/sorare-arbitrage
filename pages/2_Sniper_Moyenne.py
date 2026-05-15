@@ -13,37 +13,30 @@ try:
     DEFAULT_EMAIL = st.secrets["SORARE_EMAIL"]
     DEFAULT_PWD = st.secrets["SORARE_PASSWORD"]
 except:
-    st.error("Erreur : Secrets manquants.")
+    st.error("Secrets manquants.")
     st.stop()
 
 API_URL = "https://api.sorare.com/graphql"
 AUDIENCE = "sorare-app"
 CURRENT_SEASON_YEAR = 2026 
-MIN_DISCOUNT_PERCENT = 20 
 
 if 'token' not in st.session_state: st.session_state['token'] = None
-if 'sent_alerts' not in st.session_state: st.session_state['sent_alerts'] = set()
 
-# --- FONCTIONS DE SÉCURITÉ ---
+# --- SÉCURITÉ ---
 def safe_get(obj, *keys):
-    """Parcourt un dictionnaire de manière sécurisée."""
     for key in keys:
-        if isinstance(obj, dict):
-            obj = obj.get(key)
-        else:
-            return None
+        if isinstance(obj, dict): obj = obj.get(key)
+        else: return None
     return obj
 
 def extract_price(amounts):
-    """Extrait le prix en EUR d'une liste de prix."""
     if not isinstance(amounts, list): return None
     for a in amounts:
-        if isinstance(a, dict) and a.get('eurCents'):
-            return float(a['eurCents']) / 100
+        if isinstance(a, dict) and a.get('eurCents'): return float(a['eurCents']) / 100
     return None
 
-# --- LOGIQUE MÉTIER ---
-def get_floor(slug, is_in, jwt_token, p_now):
+# --- CORE ---
+def get_floor_debug(slug, is_in, jwt_token, p_now):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE}
     query = """query f($s:String!){tokens{liveSingleSaleOffers(playerSlug:$s,first:15){nodes{senderSide{anyCards{rarityTyped seasonYear}}receiverSide{amounts{eurCents}}}}}}"""
     try:
@@ -51,10 +44,11 @@ def get_floor(slug, is_in, jwt_token, p_now):
         nodes = safe_get(r, 'data', 'tokens', 'liveSingleSaleOffers', 'nodes') or []
         prices = []
         for n in nodes:
-            cards = safe_get(n, 'senderSide', 'anyCards')
+            cards = safe_get(n, 'senderSide', 'anyCards') or []
             if not cards: continue
             c = cards[0]
-            if c.get('rarityTyped') == 'limited' and (c.get('seasonYear') == CURRENT_SEASON_YEAR) == is_in:
+            # On compare le floor sur la même catégorie (In-Season / Classic)
+            if str(c.get('rarityTyped')).lower() == 'limited' and (c.get('seasonYear') == CURRENT_SEASON_YEAR) == is_in:
                 p = extract_price(safe_get(n, 'receiverSide', 'amounts'))
                 if p: prices.append(p)
         prices.sort()
@@ -62,66 +56,67 @@ def get_floor(slug, is_in, jwt_token, p_now):
         return prices[0] if prices else None
     except: return None
 
-def scan_flux(jwt_token):
+def scan_diagnostic(jwt_token):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE}
-    query = """query g{tokens{liveSingleSaleOffers(first:60,sport:FOOTBALL){nodes{startDatereceiverSide{amounts{eurCents}}senderSide{anyCards{slug rarityTyped seasonYear anyPlayer{displayName slug averageScore(type:LAST_FIFTEEN_SO5_AVERAGE_SCORE)}}}}}}}"""
+    query = """query g{tokens{liveSingleSaleOffers(first:80,sport:FOOTBALL){nodes{startDate receiverSide{amounts{eurCents}}senderSide{anyCards{slug rarityTyped seasonYear anyPlayer{displayName slug averageScore(type:LAST_FIFTEEN_SO5_AVERAGE_SCORE)}}}}}}}"""
     try:
         r = requests.post(API_URL, json={'query': query}, headers=headers, timeout=15).json()
         nodes = safe_get(r, 'data', 'tokens', 'liveSingleSaleOffers', 'nodes')
-        if not isinstance(nodes, list): return []
+        if not nodes: return []
         
-        # Tri par date
-        nodes.sort(key=lambda x: x.get('startDate', '') if isinstance(x, dict) else '', reverse=True)
-        
+        nodes.sort(key=lambda x: x.get('startDate', ''), reverse=True)
         findings = []
         now = datetime.now(tz.tzutc())
 
         for n in nodes:
-            if not isinstance(n, dict): continue
-            cards = safe_get(n, 'senderSide', 'anyCards')
-            if not cards or cards[0].get('rarityTyped') != 'limited': continue
+            cards = safe_get(n, 'senderSide', 'anyCards') or []
+            if not cards: continue
+            
+            # On vérifie la rareté sans être trop sensible à la casse
+            rarity = str(cards[0].get('rarityTyped')).lower()
+            if rarity != 'limited': continue
             
             p_now = extract_price(safe_get(n, 'receiverSide', 'amounts'))
             if not p_now: continue
 
-            player = cards[0].get('anyPlayer', {})
+            player = cards[0].get('anyPlayer') or {}
             l15 = player.get('averageScore', 0)
-            if not l15 or l15 == 0: continue
-
-            is_in = cards[0].get('seasonYear') == CURRENT_SEASON_YEAR
+            is_in = (cards[0].get('seasonYear') == CURRENT_SEASON_YEAR)
             
-            # Temps
+            # Calcul du temps (on élargit à 4h pour être sûr de voir du monde)
             try:
                 start_dt = datetime.strptime(n['startDate'], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=tz.tzutc())
                 age = int((now - start_dt).total_seconds() // 60)
             except: age = 999
-            if age > 120: continue 
+            if age > 240: continue 
 
-            floor = get_floor(player.get('slug'), is_in, jwt_token, p_now)
-            if floor and floor >= 1.10:
+            floor = get_floor_debug(player.get('slug'), is_in, jwt_token, p_now)
+            
+            # Calcul de la décote (on autorise tout pour le debug)
+            discount = 0.0
+            if floor:
                 discount = round(((floor - p_now) / floor) * 100, 1)
-                if discount > -100:
-                    findings.append({
-                        "🛒": f"https://sorare.com/football/cards/{cards[0]['slug']}",
-                        "Âge": f"{age} min",
-                        "Joueur": player.get('displayName'),
-                        "L15": l15,
-                        "Prix (€)": p_now,
-                        "Floor (€)": floor,
-                        "Décote (%)": discount,
-                        "_d": n['startDate']
-                    })
-                    if discount >= MIN_DISCOUNT_PERCENT and cards[0]['slug'] not in st.session_state['sent_alerts']:
-                        msg = f"🚀 SNIPE : {player.get('displayName')} -{discount}% ({p_now}€)"
-                        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
-                        st.session_state['sent_alerts'].add(cards[0]['slug'])
+
+            # ON AFFICHE TOUT (Même si discount < 0 ou L15 = 0)
+            findings.append({
+                "🛒": f"https://sorare.com/football/cards/{cards[0]['slug']}",
+                "Âge": f"{age} min",
+                "Joueur": player.get('displayName', 'Inconnu'),
+                "L15": l15,
+                "Cat": "In-Season" if is_in else "Classic",
+                "Prix (€)": p_now,
+                "Floor (€)": floor,
+                "Décote (%)": discount,
+                "_d": n['startDate']
+            })
+            
         return findings
     except Exception as e:
-        st.error(f"Erreur technique : {e}")
+        st.error(f"Erreur : {e}")
         return []
 
-# --- INTERFACE ---
-st.set_page_config(page_title="Sniper V3.1", layout="wide")
+# --- UI ---
+st.set_page_config(page_title="Sniper Diag", layout="wide")
 
 if not st.session_state['token']:
     if st.button("🚀 Connexion"):
@@ -132,12 +127,12 @@ if not st.session_state['token']:
         st.session_state['token'] = safe_get(res, 'data', 'signIn', 'jwtToken', 'token')
         st.rerun()
 else:
-    st.sidebar.success("Scanner ON")
-    data = scan_flux(st.session_state['token'])
+    st.sidebar.write(f"Dernière maj : {datetime.now().strftime('%H:%M:%S')}")
+    data = scan_diagnostic(st.session_state['token'])
     if data:
-        df = pd.DataFrame(data).drop(columns=['_d'])
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(data).drop(columns=['_d']), use_container_width=True, hide_index=True)
     else:
-        st.info("Attente de nouvelles cartes...")
+        st.warning("Aucune carte Limited trouvée dans les 4 dernières heures.")
+    
     time.sleep(60)
     st.rerun()
