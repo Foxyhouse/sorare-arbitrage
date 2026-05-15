@@ -40,11 +40,11 @@ def get_segmented_floors(player_slug, is_in_season, jwt_token):
 
 def scan_arbitrage_sniper(jwt_token):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE}
-    # On agrandit la fenêtre à 350 items
+    # On agrandit la fenêtre à 1350 items
     query = """
     query GetMarketFlux {
       tokens {
-        liveSingleSaleOffers(first: 350, sport: FOOTBALL) {
+        liveSingleSaleOffers(first: 1350, sport: FOOTBALL) {
           nodes {
             senderSide { 
               anyCards { rarityTyped seasonYear anyPlayer { displayName slug } } 
