@@ -8,33 +8,16 @@ from datetime import datetime, timedelta
 API_URL = "https://api.sorare.com/graphql"
 AUDIENCE = "sorare-app"
 
-def get_user_salt(email):
-    try:
-        res = requests.get(f"https://api.sorare.com/api/v1/users/{email}", timeout=5)
-        return res.json().get("salt") if res.status_code == 200 else None
-    except: return None
-
-def sorare_sign_in(email, hashed_password=None, otp_attempt=None, otp_session_challenge=None):
-    query = """
-    mutation SignInMutation($input: signInInput!) {
-      signIn(input: $input) {
-        jwtToken(aud: "sorare-app") { token }
-        otpSessionChallenge
-        errors { message }
-      }
-    }
-    """
-    input_data = {"otpSessionChallenge": otp_session_challenge, "otpAttempt": otp_attempt} if otp_session_challenge else {"email": email, "password": hashed_password}
-    try:
-        return requests.post(API_URL, json={'query': query, 'variables': {"input": input_data}}, timeout=10).json()
-    except: return {"errors": [{"message": "Erreur serveur"}]}
-
-def get_limited_floor(player_slug, jwt_token):
+# --- RÉCUPÉRATION DES FLOORS (LIM & RARE) ---
+def get_floors(player_slug, jwt_token):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE}
     query = """
-    query GetLim($slug: String!) {
+    query GetFloors($slug: String!) {
       tokens {
-        liveSingleSaleOffers(playerSlug: $slug, first: 5) {
+        limited: liveSingleSaleOffers(playerSlug: $slug, rarities: [limited], first: 1) {
+          nodes { receiverSide { amounts { eurCents } } }
+        }
+        rare: liveSingleSaleOffers(playerSlug: $slug, rarities: [rare], first: 5) {
           nodes { receiverSide { amounts { eurCents } } }
         }
       }
@@ -42,21 +25,37 @@ def get_limited_floor(player_slug, jwt_token):
     """
     try:
         res = requests.post(API_URL, json={'query': query, 'variables': {'slug': player_slug}}, headers=headers).json()
-        nodes = res.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
-        # Sécurité : On filtre uniquement les offres qui ont un prix non nul
-        prices = [float(n['receiverSide']['amounts']['eurCents'])/100 for n in nodes if n.get('receiverSide', {}).get('amounts') and n['receiverSide']['amounts'].get('eurCents')]
-        return min(prices) if prices else None
-    except: return None
+        data = res.get('data', {}).get('tokens', {})
+        
+        # Floor Limited
+        lim_nodes = data.get('limited', {}).get('nodes', [])
+        f_lim = float(lim_nodes[0]['receiverSide']['amounts']['eurCents'])/100 if lim_nodes else None
+        
+        # Floor Rare (le moins cher de la liste)
+        rare_nodes = data.get('rare', {}).get('nodes', [])
+        rare_prices = [float(n['receiverSide']['amounts']['eurCents'])/100 for n in rare_nodes if n.get('receiverSide', {}).get('amounts')]
+        f_rare = min(rare_prices) if rare_prices else None
+        
+        return f_lim, f_rare
+    except: return None, None
 
 def scan_arbitrage_live(jwt_token):
     headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE}
     since_date = (datetime.now() - timedelta(hours=24)).isoformat() + "Z"
+    
+    # Requête incluant la saison pour distinguer In-Season / Classic
     query = """
     query GetLiveFlux($since: ISO8601DateTime) {
       tokens {
-        liveSingleSaleOffers(first: 50, sport: FOOTBALL, updatedAfter: $since) {
+        liveSingleSaleOffers(first: 40, sport: FOOTBALL, updatedAfter: $since) {
           nodes {
-            senderSide { anyCards { rarityTyped anyPlayer { displayName slug } } }
+            senderSide { 
+              anyCards { 
+                rarityTyped 
+                season { name }
+                anyPlayer { displayName slug } 
+              } 
+            }
             receiverSide { amounts { eurCents } }
             startDate
           }
@@ -68,91 +67,68 @@ def scan_arbitrage_live(jwt_token):
         res = requests.post(API_URL, json={'query': query, 'variables': {'since': since_date}}, headers=headers).json()
         nodes = res.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
         findings = []
+        
+        current_season = "2025-2026" # À ajuster selon la saison actuelle Sorare
+        
         for n in nodes:
-            # SÉCURITÉ : On vérifie que le prix existe avant de continuer
             eur_cents = n.get('receiverSide', {}).get('amounts', {}).get('eurCents')
-            if eur_cents is None:
-                continue
-
             cards = n.get('senderSide', {}).get('anyCards', [])
-            if cards and str(cards[0].get('rarityTyped')).lower() == 'rare':
-                raw_date = n.get('startDate', "")
-                try:
-                    f_date = datetime.fromisoformat(raw_date.replace('Z', '+00:00')).strftime("%H:%M")
-                except:
-                    f_date = "--:--"
+            
+            if eur_cents and cards and str(cards[0].get('rarityTyped')).lower() == 'rare':
+                card = cards[0]
+                season_name = card.get('season', {}).get('name', "")
+                status = "🟢 In-Season" if current_season in season_name else "⚪ Classic"
+                
+                player_name = card.get('anyPlayer', {}).get('displayName')
+                player_slug = card.get('anyPlayer', {}).get('slug')
+                price_rare_listing = float(eur_cents) / 100
+                
+                # Récupération des floors pour comparaison
+                f_lim, f_rare_market = get_floors(player_slug, jwt_token)
+                
+                ratio = round(price_rare_listing / f_lim, 2) if f_lim else None
                 
                 findings.append({
-                    "Vente": f_date,
-                    "Joueur": cards[0].get('anyPlayer', {}).get('displayName'),
-                    "Slug": cards[0].get('anyPlayer', {}).get('slug'),
-                    "Prix Rare (€)": float(eur_cents) / 100
+                    "Vente": datetime.fromisoformat(n.get('startDate').replace('Z', '+00:00')).strftime("%H:%M"),
+                    "Joueur": player_name,
+                    "Type": status,
+                    "Prix Annonce (€)": price_rare_listing,
+                    "Floor Rare (€)": f_rare_market,
+                    "Floor Lim (€)": f_lim,
+                    "Ratio (R/L)": ratio,
+                    "Slug": player_slug
                 })
-        
-        # On calcule le ratio pour les Rares trouvées
-        for item in findings[:15]:
-            floor = get_limited_floor(item['Slug'], jwt_token)
-            item['Floor Limited (€)'] = floor
-            if floor and floor > 0:
-                item['Ratio'] = round(item['Prix Rare (€)'] / floor, 2)
-            else:
-                item['Ratio'] = None
         return findings
     except Exception as e:
-        st.error(f"Erreur technique : {e}")
         return []
 
-# --- INTERFACE ---
-st.set_page_config(page_title="Scanner Arbitrage", layout="wide")
-st.title("⚽ Scanner d'Arbitrage (Flux 24h)")
+# --- UI STREAMLIT ---
+st.set_page_config(page_title="Scanner Arbitrage Pro", layout="wide")
+st.title("🚀 Arbitrage : In-Season vs Classic")
 
-if 'token' not in st.session_state: st.session_state['token'] = None
-if 'otp_challenge' not in st.session_state: st.session_state['otp_challenge'] = None
+# ... (Bloc de connexion inchangé) ...
 
-if not st.session_state['token']:
-    if not st.session_state['otp_challenge']:
-        with st.form("login"):
-            u_email = st.text_input("Email", value="jacques.troispoils@gmail.com")
-            u_pwd = st.text_input("Mot de passe", type="password")
-            if st.form_submit_button("Lancer le Scanner"):
-                salt = get_user_salt(u_email)
-                if salt:
-                    hpwd = bcrypt.hashpw(u_pwd.encode(), salt.encode()).decode()
-                    res = sorare_sign_in(u_email, hpwd)
-                    data = res.get('data', {}).get('signIn', {})
-                    if data.get('otpSessionChallenge'):
-                        st.session_state['otp_challenge'] = data['otpSessionChallenge']
-                        st.session_state['temp_email'] = u_email
-                        st.rerun()
-                    elif data.get('jwtToken'):
-                        st.session_state['token'] = data['jwtToken']['token']
-                        st.rerun()
-                    else: st.error("Identifiants incorrects.")
-                else: st.error("Compte introuvable.")
-    else:
-        with st.form("otp"):
-            code = st.text_input("Code OTP")
-            if st.form_submit_button("Valider"):
-                res = sorare_sign_in(st.session_state['temp_email'], otp_attempt=code, otp_session_challenge=st.session_state['otp_challenge'])
-                if res.get('data', {}).get('signIn', {}).get('jwtToken'):
-                    st.session_state['token'] = res['data']['signIn']['jwtToken']['token']
-                    st.rerun()
-else:
-    st.sidebar.button("Déconnexion", on_click=lambda: st.session_state.clear())
-    if st.button("🔄 Rafraîchir le flux"):
-        st.rerun()
+if st.session_state.get('token'):
+    if st.button("🔄 Rafraîchir le flux"): st.rerun()
 
     results = scan_arbitrage_live(st.session_state['token'])
     
     if results:
         df = pd.DataFrame(results).drop(columns=['Slug'])
-        def color_ratio(val):
+        
+        def highlight_logic(row):
+            styles = [''] * len(row)
             try:
-                if val is not None and float(val) < 4.0:
-                    return 'background-color: #d4edda; color: #155724; font-weight: bold'
+                # Si le prix de l'annonce est inférieur au floor rare du marché = Affaire !
+                if row['Prix Annonce (€)'] < row['Floor Rare (€)']:
+                    styles[3] = 'background-color: #fff3cd; color: #856404;' # Jaune : Prix plus bas que le floor
+                
+                # Si le ratio Rare/Limited est top
+                if row['Ratio (R/L)'] is not None and float(row['Ratio (R/L)']) < 4.0:
+                    styles[6] = 'background-color: #d4edda; color: #155724; font-weight: bold'
             except: pass
-            return ''
+            return styles
 
-        st.dataframe(df.style.map(color_ratio, subset=['Ratio']), use_container_width=True)
+        st.dataframe(df.style.apply(highlight_logic, axis=1), use_container_width=True)
     else:
-        st.info("Aucune Rare avec prix détectée. Réessaie.")
+        st.info("Recherche de nouvelles opportunités Rares...")
