@@ -35,16 +35,18 @@ def get_market_data(slug, jwt_token):
         "Content-Type": "application/json"
     }
     
-    # STRATÉGIE FINALE : On cible l'objet Player directement par son slug unique
+    # LA RUSE : Utiliser 'players' (pluriel) mais forcer le type 'Player' à l'intérieur
     query = """
-    query GetFloor($slug: String!) {
-      player(slug: $slug) {
-        anyCards(rarities: [limited, rare]) {
-          nodes {
-            rarityTyped
-            liveSingleSaleOffer {
-              receiverSide {
-                wei
+    query GetFloor($slugs: [String!]) {
+      players(slugs: $slugs) {
+        ... on Player {
+          anyCards(rarities: [limited, rare]) {
+            nodes {
+              rarityTyped
+              liveSingleSaleOffer {
+                receiverSide {
+                  wei
+                }
               }
             }
           }
@@ -53,15 +55,17 @@ def get_market_data(slug, jwt_token):
     }
     """
     try:
-        res = requests.post(API_URL, json={'query': query, 'variables': {'slug': slug}}, headers=headers).json()
+        # On passe le slug dans une liste : [slug]
+        res = requests.post(API_URL, json={'query': query, 'variables': {'slugs': [slug]}}, headers=headers).json()
         st.session_state['last_debug'] = res 
         
         if "errors" in res: return None, None
 
-        player_node = res.get('data', {}).get('player')
-        if not player_node: return None, None
+        players_list = res.get('data', {}).get('players', [])
+        if not players_list or not players_list[0]: return None, None
         
-        cards = player_node.get('anyCards', {}).get('nodes', [])
+        # On extrait les données du premier (et seul) joueur trouvé
+        cards = players_list[0].get('anyCards', {}).get('nodes', [])
         lim_prices, rare_prices = [], []
         
         for c in cards:
