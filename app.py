@@ -10,11 +10,8 @@ AUDIENCE = "sorare-app"
 def get_user_salt(email):
     try:
         res = requests.get(f"https://api.sorare.com/api/v1/users/{email}", timeout=5)
-        if res.status_code == 200:
-            return res.json().get("salt")
-    except:
-        return None
-    return None
+        if res.status_code == 200: return res.json().get("salt")
+    except: return None
 
 def sorare_sign_in(email, hashed_password=None, otp_attempt=None, otp_session_challenge=None):
     query = """
@@ -26,42 +23,29 @@ def sorare_sign_in(email, hashed_password=None, otp_attempt=None, otp_session_ch
       }
     }
     """
-    if otp_session_challenge:
-        input_data = {"otpSessionChallenge": otp_session_challenge, "otpAttempt": otp_attempt}
-    else:
-        input_data = {"email": email, "password": hashed_password}
-        
+    input_data = {"otpSessionChallenge": otp_session_challenge, "otpAttempt": otp_attempt} if otp_session_challenge else {"email": email, "password": hashed_password}
     try:
-        headers = {"User-Agent": "SorareArbitrageBot/1.0"}
-        res = requests.post(API_URL, json={'query': query, 'variables': {"input": input_data}}, headers=headers, timeout=10)
-        return res.json()
-    except Exception as e:
-        return {"errors": [{"message": str(e)}]}
+        return requests.post(API_URL, json={'query': query, 'variables': {"input": input_data}}, timeout=10).json()
+    except: return {"errors": [{"message": "Erreur connexion"}]}
 
-# --- LOGIQUE DE MARCHÉ (AFFICHAGE EN EUROS) ---
-def get_market_data(slug, jwt_token):
-    headers = {
-        "Authorization": f"Bearer {jwt_token}",
-        "JWT-AUD": AUDIENCE,
-        "Content-Type": "application/json"
-    }
+# --- LOGIQUE DE SCANNER ---
+
+def get_latest_rare_and_compare(jwt_token):
+    headers = {"Authorization": f"Bearer {jwt_token}", "JWT-AUD": AUDIENCE, "Content-Type": "application/json"}
     
-    # On demande eurCents au lieu de wei pour avoir les prix en euros
-    query = """
-    query GetFloor($slug: String!) {
+    # 1. On récupère les 10 dernières offres Rares
+    query_latest = """
+    query GetLatestRares {
       tokens {
-        liveSingleSaleOffers(playerSlug: $slug) {
+        liveSingleSaleOffers(rarities: [rare], first: 10) {
           nodes {
             senderSide {
               anyCards {
-                rarityTyped
+                slug
+                player { displayName }
               }
             }
-            receiverSide {
-              amounts {
-                eurCents
-              }
-            }
+            receiverSide { amounts { eurCents } }
           }
         }
       }
@@ -69,113 +53,79 @@ def get_market_data(slug, jwt_token):
     """
     
     try:
-        res = requests.post(API_URL, json={'query': query, 'variables': {'slug': slug}}, headers=headers, timeout=10).json()
-        st.session_state['last_debug'] = res 
-        
-        if "errors" in res:
-            return None, None
-
+        res = requests.post(API_URL, json={'query': query_latest}, headers=headers).json()
         offers = res.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
         
-        lim_prices, rare_prices = [], []
-        
+        results = []
         for offer in offers:
-            sender_side = offer.get('senderSide', {})
-            cards = sender_side.get('anyCards', [])
-            if not cards:
-                continue
+            card = offer.get('senderSide', {}).get('anyCards', [{}])[0]
+            player_name = card.get('player', {}).get('displayName', "Inconnu")
+            player_slug = card.get('slug').split('-')[0] # On simplifie pour avoir le slug joueur
+            rare_price = float(offer.get('receiverSide', {}).get('amounts', {}).get('eurCents', 0)) / 100
             
-            rarity = str(cards[0].get('rarityTyped', '')).lower()
+            # 2. Pour chaque offre, on cherche le floor Limited de ce joueur
+            query_lim = """
+            query GetLimFloor($slug: String!) {
+              tokens {
+                liveSingleSaleOffers(playerSlug: $slug, rarities: [limited]) {
+                  nodes { receiverSide { amounts { eurCents } } }
+                }
+              }
+            }
+            """
+            res_lim = requests.post(API_URL, json={'query': query_lim, 'variables': {'slug': player_slug}}, headers=headers).json()
+            lim_offers = res_lim.get('data', {}).get('tokens', {}).get('liveSingleSaleOffers', {}).get('nodes', [])
             
-            # Récupération des centimes d'euro et conversion en euros
-            eur_cents = offer.get('receiverSide', {}).get('amounts', {}).get('eurCents')
+            lim_prices = [float(o['receiverSide']['amounts']['eurCents'])/100 for o in lim_offers if o['receiverSide']['amounts']['eurCents']]
+            min_lim = min(lim_prices) if lim_prices else None
             
-            if eur_cents is not None:
-                price_eur = float(eur_cents) / 100.0
-                if rarity == 'limited':
-                    lim_prices.append(price_eur)
-                elif rarity == 'rare':
-                    rare_prices.append(price_eur)
-        
-        p_lim = min(lim_prices) if lim_prices else None
-        p_rare = min(rare_prices) if rare_prices else None
-        return p_lim, p_rare
-    except Exception as e:
-        return None, None
+            results.append({
+                "name": player_name,
+                "rare_price": rare_price,
+                "lim_price": min_lim
+            })
+        return results
+    except: return []
 
 # --- INTERFACE ---
-st.set_page_config(page_title="Arbitrage Sorare EUR", page_icon="💶", layout="wide")
-st.title("🎯 Sorare Arbitrage (Prix en Euros)")
+st.set_page_config(page_title="Scanner Arbitrage", page_icon="🔥", layout="wide")
+st.title("🔥 Scanner : 10 Dernières Ventes Rares")
 
 if 'token' not in st.session_state: st.session_state['token'] = None
-if 'otp' not in st.session_state: st.session_state['otp'] = None
 
 if not st.session_state['token']:
-    # Formulaire de connexion identique
-    col_log, _ = st.columns([1, 2])
-    with col_log:
-        if not st.session_state['otp']:
-            with st.form("login"):
-                st.subheader("🔑 Connexion")
-                email = st.text_input("Email", value="jacques.troispoils@gmail.com")
-                pwd = st.text_input("Mot de passe", type="password")
-                if st.form_submit_button("Se connecter"):
-                    salt = get_user_salt(email)
-                    if salt:
-                        hpwd = bcrypt.hashpw(pwd.encode(), salt.encode()).decode()
-                        res = sorare_sign_in(email, hpwd)
-                        data = res.get('data', {}).get('signIn', {})
-                        if data.get('otpSessionChallenge'):
-                            st.session_state['otp'] = data['otpSessionChallenge']
-                            st.session_state['mail'] = email
-                            st.rerun()
-                        elif data.get('jwtToken'):
-                            st.session_state['token'] = data['jwtToken']['token']
-                            st.rerun()
-                        else: st.error("Erreur d'identifiants.")
-                    else: st.error("Compte introuvable.")
-        else:
-            with st.form("otp_form"):
-                code = st.text_input("Saisir le code 2FA")
-                if st.form_submit_button("Valider"):
-                    res = sorare_sign_in(st.session_state['mail'], otp_attempt=code, otp_session_challenge=st.session_state['otp'])
-                    if res.get('data', {}).get('signIn', {}).get('jwtToken'):
-                        st.session_state['token'] = res['data']['signIn']['jwtToken']['token']
-                        st.rerun()
+    # (Garder ici ton bloc de connexion habituel...)
+    with st.form("login"):
+        e = st.text_input("Email", value="jacques.troispoils@gmail.com")
+        p = st.text_input("Pass", type="password")
+        if st.form_submit_button("Scanner le marché"):
+            salt = get_user_salt(e)
+            if salt:
+                hp = bcrypt.hashpw(p.encode(), salt.encode()).decode()
+                res = sorare_sign_in(e, hp)
+                if res.get('data', {}).get('signIn', {}).get('jwtToken'):
+                    st.session_state['token'] = res['data']['signIn']['jwtToken']['token']
+                    st.rerun()
 else:
-    st.sidebar.success("✅ Connecté")
-    if st.sidebar.button("Déconnecter"):
-        st.session_state['token'] = None
-        st.session_state['otp'] = None
+    if st.button("🔄 Rafraîchir le flux"):
         st.rerun()
 
-    watchlist = {
-        "Hervé Koffi": "kouakou-herve-koffi",
-        "Jordan Lefort": "jordan-lefort",
-        "Lucas Chevalier": "lucas-chevalier"
-    }
-
-    st.subheader("🚀 Opportunités en Euros")
+    data = get_latest_rare_and_compare(st.session_state['token'])
     
-    for name, slug in watchlist.items():
+    for item in data:
         with st.container():
-            p_lim, p_rare = get_market_data(slug, st.session_state['token'])
             c1, c2, c3, c4 = st.columns([2, 1, 1, 2])
-            c1.markdown(f"### {name}")
+            c1.markdown(f"**{item['name']}**")
+            c2.write(f"Rare: {item['rare_price']:.2f}€")
             
-            if p_lim: c2.metric("Floor Limited", f"{p_lim:.2f} €")
-            else: c2.caption("Aucune Limited")
-            
-            if p_rare: c3.metric("Floor Rare", f"{p_rare:.2f} €")
-            else: c3.caption("Aucune Rare")
-
-            if p_lim and p_rare:
-                ratio = p_rare / p_lim
+            if item['lim_price']:
+                c3.write(f"Lim: {item['lim_price']:.2f}€")
+                ratio = item['rare_price'] / item['lim_price']
                 if ratio < 4.0:
-                    c4.success(f"🔥 Ratio : {ratio:.2f}")
+                    c4.success(f"🎯 RATIO CHAUD : {ratio:.2f}")
                 else:
                     c4.info(f"Ratio : {ratio:.2f}")
+            else:
+                c3.write("Pas de Lim")
+                c4.write("-")
             st.divider()
-
-    if st.checkbox("🔍 Debug JSON"):
-        st.json(st.session_state.get('last_debug', {}))
